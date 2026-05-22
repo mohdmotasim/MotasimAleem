@@ -2936,7 +2936,7 @@ if compare_on:
     else:
         st.session_state["compare_symbol"] = ""
 
-tab_research, tab_portfolio_health, tab_holdings = st.tabs(["Research", "Portfolio Health", "Current Holdings"])
+tab_research, tab_portfolio_health, tab_holdings, tab_scanner = st.tabs(["Research", "Portfolio Health", "Current Holdings", "Dark Horse Scanner"])
 
 selected = st.session_state.get("selected_symbol")
 compare_symbol = st.session_state.get("compare_symbol", "")
@@ -3104,6 +3104,257 @@ with tab_holdings:
                     remove_holding(idx)
                     st.success(f"Removed {holding['symbol']}.")
                     st.rerun()
+
+with tab_scanner:
+    render_section_header(
+        "Dark Horse Scanner",
+        "Screen NSE stocks for undervalued, cash-generating companies with strong fundamentals."
+    )
+
+    # Scanner controls
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        num_stocks = st.selectbox("Number of stocks to screen", [50, 100, 200, 500], index=1)
+    with col2:
+        min_score = st.slider("Minimum Dark Horse Score", 0, 100, 60)
+    with col3:
+        scan_btn = st.button("Run Scanner", use_container_width=True)
+
+    if scan_btn or "scanner_results" not in st.session_state:
+        with st.spinner("Screening stocks... This may take a few minutes."):
+            # Use top N stocks from NIFTY 50, 100, 200, 500 as proxy for screening
+            # In production, you'd use nsepython or jugaad-trader to get full NSE list
+            nse_stocks = [
+                "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
+                "HINDUNILVR.NS", "SBIN.NS", "BHARTIARTL.NS", "ITC.NS", "KOTAKBANK.NS",
+                "LICI.NS", "AXISBANK.NS", "LT.NS", "BAJFINANCE.NS", "WIPRO.NS",
+                "TATAMOTORS.NS", "MARUTI.NS", "HCLTECH.NS", "SUNPHARMA.NS", "TITAN.NS",
+                "NTPC.NS", "ULTRACEMCO.NS", "POWERGRID.NS", "BAJAJ-AUTO.NS", "NESTLEIND.NS",
+                "DRREDDY.NS", "ASIANPAINT.NS", "TATASTEEL.NS", "MAHINDRA.NS", "JSWSTEEL.NS",
+                "DIVISLAB.NS", "M&M.NS", "ADANIENT.NS", "TATACONSUM.NS", "HINDALCO.NS",
+                "CIPLA.NS", "GRASIM.NS", "WELCORP.NS", "DLF.NS", "BRITANNIA.NS",
+                "EICHERMOT.NS", "HEROMOTOCO.NS", "ACC.NS", "AMBUJACEM.NS", "ZOMATO.NS",
+                "DMART.NS", "PERSISTENT.NS", "TRENT.NS", "APOLLOHOSP.NS", "BERGEPAINT.NS",
+            ]
+
+            # Limit to selected number
+            stocks_to_screen = nse_stocks[:num_stocks]
+
+            results = []
+            skipped = 0
+
+            for sym in stocks_to_screen:
+                try:
+                    data = fetch_stock_data(sym)
+                    info = yf.Ticker(sym).info or {}
+
+                    # Fundamental filters
+                    pe = _safe_float(info.get("trailingPE") or info.get("forwardPE"))
+                    pb = _safe_float(info.get("priceToBook"))
+                    debt_to_equity = _safe_float(info.get("debtToEquity"))
+                    revenue_growth = _safe_float(info.get("revenueGrowth"))
+                    if revenue_growth and abs(revenue_growth) <= 1:
+                        revenue_growth *= 100
+                    eps_growth = _safe_float(info.get("earningsQuarterlyGrowth"))
+                    if eps_growth and abs(eps_growth) <= 1:
+                        eps_growth *= 100
+                    roe = _safe_float(info.get("returnOnEquity"))
+                    if roe and abs(roe) <= 1:
+                        roe *= 100
+                    market_cap = _safe_float(info.get("marketCap"))
+                    promoter_holding = _safe_float(info.get("heldPercentInsiders"))
+                    if promoter_holding and promoter_holding <= 1:
+                        promoter_holding *= 100
+
+                    # Apply filters
+                    if pe is None or not (5 <= pe <= 25):
+                        skipped += 1
+                        continue
+                    if pb is None or pb >= 3:
+                        skipped += 1
+                        continue
+                    if debt_to_equity is None or debt_to_equity >= 0.5:
+                        skipped += 1
+                        continue
+                    if revenue_growth is None or revenue_growth <= 10:
+                        skipped += 1
+                        continue
+                    if eps_growth is None or eps_growth <= 10:
+                        skipped += 1
+                        continue
+                    if roe is None or roe <= 12:
+                        skipped += 1
+                        continue
+                    if market_cap is None or not (5e9 <= market_cap <= 1e11):  # 500 Cr to 10,000 Cr
+                        skipped += 1
+                        continue
+                    if promoter_holding is None or promoter_holding <= 40:
+                        skipped += 1
+                        continue
+
+                    # Calculate dark horse score
+                    score = 0
+                    ocf_score = 0
+
+                    # PE score (15 pts) - lower is better
+                    pe_score = max(0, min(15, (25 - pe) / 20 * 15))
+                    score += pe_score
+
+                    # EPS growth score (15 pts)
+                    eps_score = max(0, min(15, (eps_growth - 10) / 40 * 15))
+                    score += eps_score
+
+                    # Debt + ROE score (15 pts)
+                    debt_score = max(0, min(7.5, (0.5 - debt_to_equity) / 0.5 * 7.5))
+                    roe_score = max(0, min(7.5, (roe - 12) / 28 * 7.5))
+                    score += debt_score + roe_score
+
+                    # Institutional interest score (15 pts) - proxy with volume
+                    avg_volume = _safe_float(info.get("averageVolume"))
+                    inst_score = 7.5 if avg_volume and avg_volume > 1000000 else 0
+                    score += inst_score
+
+                    # Price position score (15 pts) - near 52-week low
+                    week_52_low = data.get("week_52_low")
+                    week_52_high = data.get("week_52_high")
+                    current_price = data.get("current_price")
+                    if week_52_low and week_52_high and current_price:
+                        position_52w = (current_price - week_52_low) / (week_52_high - week_52_low) * 100
+                        price_score = max(0, min(15, (50 - position_52w) / 50 * 15))
+                        score += price_score
+                    else:
+                        price_score = 7.5
+                        score += price_score
+
+                    # OCF score (25 pts) - highest weight
+                    ocf = _safe_float(info.get("operatingCashflow"))
+                    net_income = _safe_float(info.get("netIncomeToCommon"))
+                    revenue = _safe_float(info.get("totalRevenue"))
+
+                    if ocf and net_income:
+                        # OCF > Net Profit (10 pts)
+                        ocf_vs_profit = 10 if ocf > net_income else 5
+                        ocf_score += ocf_vs_profit
+
+                        # OCF to Revenue ratio (5 pts)
+                        if revenue:
+                            ocf_ratio = ocf / revenue
+                            ocf_ratio_score = max(0, min(5, ocf_ratio * 100))
+                            ocf_score += ocf_ratio_score
+
+                        # Positive OCF (10 pts)
+                        ocf_positive = 10 if ocf > 0 else 0
+                        ocf_score += ocf_positive
+
+                    score += ocf_score
+
+                    # Generate reasoning
+                    reasons = []
+                    if pe < 15:
+                        reasons.append(f"Low PE ({pe:.1f})")
+                    if eps_growth > 20:
+                        reasons.append(f"Strong EPS growth ({eps_growth:.1f}%)")
+                    if debt_to_equity < 0.3:
+                        reasons.append(f"Low debt ({debt_to_equity:.2f})")
+                    if roe > 18:
+                        reasons.append(f"High ROE ({roe:.1f}%)")
+                    if ocf_score > 20:
+                        reasons.append("Strong cash generation")
+
+                    reasoning = ", ".join(reasons[:3]) if reasons else "Balanced fundamentals"
+
+                    # Risk flags
+                    risks = []
+                    if debt_to_equity > 0.4:
+                        risks.append("Moderate debt")
+                    if promoter_holding < 50:
+                        risks.append("Low promoter holding")
+                    if pe > 20:
+                        risks.append("High PE")
+
+                    risk_flag = ", ".join(risks) if risks else None
+
+                    results.append({
+                        "symbol": sym,
+                        "name": data.get("name", sym.removesuffix(NSE_SUFFIX)),
+                        "sector": data.get("sector", "Unknown"),
+                        "score": round(score, 1),
+                        "ocf_score": round(ocf_score, 1),
+                        "current_price": current_price,
+                        "pe": pe,
+                        "pb": pb,
+                        "roe": roe,
+                        "debt_to_equity": debt_to_equity,
+                        "reasoning": reasoning,
+                        "risk_flag": risk_flag,
+                    })
+
+                except Exception as e:
+                    skipped += 1
+                    continue
+
+            # Sort by score
+            results.sort(key=lambda x: x["score"], reverse=True)
+            results = [r for r in results if r["score"] >= min_score]
+
+            st.session_state["scanner_results"] = results
+            st.session_state["scanner_skipped"] = skipped
+            st.session_state["scanner_timestamp"] = datetime.now().strftime("%d %b %Y, %I:%M %p")
+
+    # Display results
+    if "scanner_results" in st.session_state and st.session_state["scanner_results"]:
+        results = st.session_state["scanner_results"]
+        skipped = st.session_state["scanner_skipped"]
+        timestamp = st.session_state["scanner_timestamp"]
+
+        st.caption(f"Last updated: {timestamp} | Skipped: {skipped} stocks (didn't meet criteria)")
+
+        # Summary metrics
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Dark Horses Found", len(results))
+        m2.metric("Average Score", f"{sum(r['score'] for r in results) / len(results):.1f}")
+        m3.metric("Top Score", f"{results[0]['score']:.1f}")
+
+        # Results table
+        st.markdown("### Dark Horse Candidates")
+
+        display_data = []
+        for idx, r in enumerate(results, 1):
+            score_color = "🟢" if r["score"] >= 80 else "🟡" if r["score"] >= 60 else "🔴"
+            display_data.append({
+                "Rank": idx,
+                "Symbol": r["symbol"],
+                "Name": r["name"][:30],
+                "Sector": r["sector"][:20],
+                "Score": f"{score_color} {r['score']}",
+                "OCF Score": f"{r['ocf_score']}/25",
+                "Price": format_inr(r["current_price"]),
+                "PE": f"{r['pe']:.1f}",
+                "PB": f"{r['pb']:.1f}",
+                "ROE": f"{r['roe']:.1f}%",
+                "D/E": f"{r['debt_to_equity']:.2f}",
+                "Reasoning": r["reasoning"],
+                "Risk": r["risk_flag"] or "-",
+            })
+
+        df = pd.DataFrame(display_data)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        # Sector distribution
+        if results:
+            st.markdown("### Sector Distribution")
+            sectors = {}
+            for r in results:
+                sectors[r["sector"]] = sectors.get(r["sector"], 0) + 1
+
+            sector_df = pd.DataFrame([
+                {"Sector": k, "Count": v}
+                for k, v in sorted(sectors.items(), key=lambda x: -x[1])
+            ])
+            st.dataframe(sector_df, use_container_width=True, hide_index=True)
+
+    else:
+        st.info("Click 'Run Scanner' to start screening stocks.")
 
 last_refresh = datetime.now().strftime("%d %b %Y, %I:%M:%S %p")
 st.markdown(

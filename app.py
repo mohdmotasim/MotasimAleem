@@ -3120,30 +3120,37 @@ with tab_scanner:
     with col3:
         scan_btn = st.button("Run Scanner", use_container_width=True)
 
-    if scan_btn or "scanner_results" not in st.session_state:
-        with st.spinner("Screening stocks... This may take a few minutes."):
-            # Use top N stocks from NIFTY 50, 100, 200, 500 as proxy for screening
-            # In production, you'd use nsepython or jugaad-trader to get full NSE list
-            nse_stocks = [
-                "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
-                "HINDUNILVR.NS", "SBIN.NS", "BHARTIARTL.NS", "ITC.NS", "KOTAKBANK.NS",
-                "LICI.NS", "AXISBANK.NS", "LT.NS", "BAJFINANCE.NS", "WIPRO.NS",
-                "TATAMOTORS.NS", "MARUTI.NS", "HCLTECH.NS", "SUNPHARMA.NS", "TITAN.NS",
-                "NTPC.NS", "ULTRACEMCO.NS", "POWERGRID.NS", "BAJAJ-AUTO.NS", "NESTLEIND.NS",
-                "DRREDDY.NS", "ASIANPAINT.NS", "TATASTEEL.NS", "MAHINDRA.NS", "JSWSTEEL.NS",
-                "DIVISLAB.NS", "M&M.NS", "ADANIENT.NS", "TATACONSUM.NS", "HINDALCO.NS",
-                "CIPLA.NS", "GRASIM.NS", "WELCORP.NS", "DLF.NS", "BRITANNIA.NS",
-                "EICHERMOT.NS", "HEROMOTOCO.NS", "ACC.NS", "AMBUJACEM.NS", "ZOMATO.NS",
-                "DMART.NS", "PERSISTENT.NS", "TRENT.NS", "APOLLOHOSP.NS", "BERGEPAINT.NS",
-            ]
+    if scan_btn:
+        # Use top N stocks from NIFTY 50, 100, 200, 500 as proxy for screening
+        # In production, you'd use nsepython or jugaad-trader to get full NSE list
+        nse_stocks = [
+            "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
+            "HINDUNILVR.NS", "SBIN.NS", "BHARTIARTL.NS", "ITC.NS", "KOTAKBANK.NS",
+            "LICI.NS", "AXISBANK.NS", "LT.NS", "BAJFINANCE.NS", "WIPRO.NS",
+            "TATAMOTORS.NS", "MARUTI.NS", "HCLTECH.NS", "SUNPHARMA.NS", "TITAN.NS",
+            "NTPC.NS", "ULTRACEMCO.NS", "POWERGRID.NS", "BAJAJ-AUTO.NS", "NESTLEIND.NS",
+            "DRREDDY.NS", "ASIANPAINT.NS", "TATASTEEL.NS", "MAHINDRA.NS", "JSWSTEEL.NS",
+            "DIVISLAB.NS", "M&M.NS", "ADANIENT.NS", "TATACONSUM.NS", "HINDALCO.NS",
+            "CIPLA.NS", "GRASIM.NS", "WELCORP.NS", "DLF.NS", "BRITANNIA.NS",
+            "EICHERMOT.NS", "HEROMOTOCO.NS", "ACC.NS", "AMBUJACEM.NS", "ZOMATO.NS",
+            "DMART.NS", "PERSISTENT.NS", "TRENT.NS", "APOLLOHOSP.NS", "BERGEPAINT.NS",
+        ]
 
-            # Limit to selected number
-            stocks_to_screen = nse_stocks[:num_stocks]
+        # Limit to selected number
+        stocks_to_screen = nse_stocks[:num_stocks]
 
-            results = []
-            skipped = 0
+        results = []
+        skipped = 0
 
-            for sym in stocks_to_screen:
+        progress_bar = st.progress(0, text="Starting scanner...")
+        status_text = st.empty()
+
+        for idx, sym in enumerate(stocks_to_screen):
+            progress = (idx + 1) / len(stocks_to_screen)
+            progress_bar.progress(progress, text=f"Analyzing {sym} ({idx + 1}/{len(stocks_to_screen)})")
+            status_text.text(f"Current: {sym} | Found: {len(results)} | Skipped: {skipped}")
+
+            try:
                 try:
                     data = fetch_stock_data(sym)
                     info = yf.Ticker(sym).info or {}
@@ -3293,13 +3300,20 @@ with tab_scanner:
                     skipped += 1
                     continue
 
-            # Sort by score
-            results.sort(key=lambda x: x["score"], reverse=True)
-            results = [r for r in results if r["score"] >= min_score]
+        # Cleanup progress indicators
+        progress_bar.empty()
+        status_text.empty()
 
-            st.session_state["scanner_results"] = results
-            st.session_state["scanner_skipped"] = skipped
-            st.session_state["scanner_timestamp"] = datetime.now().strftime("%d %b %Y, %I:%M %p")
+        # Sort by score
+        results.sort(key=lambda x: x["score"], reverse=True)
+        results = [r for r in results if r["score"] >= min_score]
+
+        st.session_state["scanner_results"] = results
+        st.session_state["scanner_skipped"] = skipped
+        st.session_state["scanner_timestamp"] = datetime.now().strftime("%d %b %Y, %I:%M %p")
+
+        st.success(f"Scan complete! Found {len(results)} dark horse candidates out of {len(stocks_to_screen)} stocks screened.")
+        st.rerun()
 
     # Display results
     if "scanner_results" in st.session_state and st.session_state["scanner_results"]:

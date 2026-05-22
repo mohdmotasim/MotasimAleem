@@ -2847,7 +2847,6 @@ with st.container(border=True):
                                 help=f"Load {sym} — {company_name}",
                             ):
                                 st.session_state["selected_symbol"] = f"{sym}{NSE_SUFFIX}"
-                                st.session_state["nse_search_input"] = ""
                                 st.rerun()
                         with btn_col2:
                             ticker_with_suffix = f"{sym}{NSE_SUFFIX}"
@@ -2862,7 +2861,6 @@ with st.container(border=True):
                                 else:
                                     add_to_conviction(ticker_with_suffix, "1")
                                     st.success(f"Added {ticker_with_suffix} to watchlist.")
-                                st.session_state["nse_search_input"] = ""
                                 st.rerun()
             else:
                 st.caption("No NSE matches yet — keep typing or try the full ticker.")
@@ -2889,7 +2887,6 @@ if search_clicked:
             nse_not_found_error(query)
         else:
             st.session_state["selected_symbol"] = ticker
-            st.session_state["nse_search_input"] = ""
             st.rerun()
 
 if add_clicked:
@@ -2907,7 +2904,6 @@ if add_clicked:
                 add_to_conviction(ticker, "1")
                 st.success(f"Added {ticker} ({display_name}) to watchlist.")
             st.session_state["selected_symbol"] = ticker
-            st.session_state["nse_search_input"] = ""
             st.rerun()
 
 st.sidebar.markdown("### Conviction watchlist")

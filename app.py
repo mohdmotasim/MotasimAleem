@@ -1390,6 +1390,8 @@ def _empty_stock_data(sym: str, *, rate_limited: bool = False) -> dict:
         "eps": None,
         "book_value": None,
         "dividend_yield": None,
+        "operating_cashflow": None,
+        "free_cashflow": None,
         "history_1y": empty_history.copy(),
         "news": [],
         "beta": None,
@@ -1501,6 +1503,8 @@ def fetch_stock_data(symbol: str) -> dict:
                 ),
                 "book_value": _safe_float(info.get("bookValue")),
                 "dividend_yield": _safe_float(info.get("dividendYield")),
+                "operating_cashflow": _safe_float(info.get("operatingCashflow")),
+                "free_cashflow": _safe_float(info.get("freeCashflow")),
                 "history_1y": history_1y,
                 "news": merged_news,
                 "beta": _safe_float(info.get("beta")),
@@ -2536,10 +2540,22 @@ def render_stock_view(data: dict) -> None:
     render_section_header("Fundamentals")
     fundamentals = pd.DataFrame(
         {
-            "Metric": ["EPS", "Book Value", "Beta", "Dividend Yield", "Volume vs Avg Volume"],
+            "Metric": [
+                "P/E Ratio",
+                "EPS",
+                "Book Value",
+                "Operating Cash Flow",
+                "Free Cash Flow",
+                "Beta",
+                "Dividend Yield",
+                "Volume vs Avg Volume",
+            ],
             "Value": [
+                f"{data['pe_ratio']:.2f}" if data.get("pe_ratio") is not None else "N/A",
                 _fmt_inr(data.get("eps")),
                 _fmt_inr(data.get("book_value")),
+                _fmt_inr(data.get("operating_cashflow")),
+                _fmt_inr(data.get("free_cashflow")),
                 f"{data['beta']:.2f}" if data.get("beta") is not None else "N/A",
                 _fmt_yield(data.get("dividend_yield")),
                 vol_text,

@@ -3318,8 +3318,35 @@ with tab_scanner:
         # Results table
         st.markdown("### Dark Horse Candidates")
 
+        # Filter controls
+        filter_col1, filter_col2, filter_col3 = st.columns(3)
+        with filter_col1:
+            sector_filter = st.selectbox("Filter by Sector", ["All"] + list(set(r["sector"] for r in results)))
+        with filter_col2:
+            sort_by = st.selectbox("Sort by", ["Score", "OCF Score", "PE", "ROE", "Price"])
+        with filter_col3:
+            sort_order = st.selectbox("Sort Order", ["Descending", "Ascending"])
+
+        # Apply filters
+        filtered_results = results
+        if sector_filter != "All":
+            filtered_results = [r for r in results if r["sector"] == sector_filter]
+
+        # Sort
+        reverse = sort_order == "Descending"
+        if sort_by == "Score":
+            filtered_results.sort(key=lambda x: x["score"], reverse=reverse)
+        elif sort_by == "OCF Score":
+            filtered_results.sort(key=lambda x: x["ocf_score"], reverse=reverse)
+        elif sort_by == "PE":
+            filtered_results.sort(key=lambda x: x["pe"], reverse=not reverse)
+        elif sort_by == "ROE":
+            filtered_results.sort(key=lambda x: x["roe"], reverse=reverse)
+        elif sort_by == "Price":
+            filtered_results.sort(key=lambda x: x["current_price"] or 0, reverse=reverse)
+
         display_data = []
-        for idx, r in enumerate(results, 1):
+        for idx, r in enumerate(filtered_results, 1):
             score_color = "🟢" if r["score"] >= 80 else "🟡" if r["score"] >= 60 else "🔴"
             display_data.append({
                 "Rank": idx,
@@ -3340,6 +3367,94 @@ with tab_scanner:
         df = pd.DataFrame(display_data)
         st.dataframe(df, use_container_width=True, hide_index=True)
 
+        # Deep dive panel
+        st.markdown("### Deep Dive Analysis")
+        selected_stock = st.selectbox("Select a stock for deep dive analysis", [r["symbol"] for r in filtered_results])
+
+        if selected_stock:
+            stock_data = next((r for r in results if r["symbol"] == selected_stock), None)
+            if stock_data:
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    st.markdown(f"#### {stock_data['name']}")
+                    st.markdown(f"**Symbol:** {stock_data['symbol']}")
+                    st.markdown(f"**Sector:** {stock_data['sector']}")
+                    st.markdown(f"**Dark Horse Score:** {stock_data['score']}/100")
+                    st.markdown(f"**OCF Score:** {stock_data['ocf_score']}/25")
+
+                with col2:
+                    st.markdown("#### Key Ratios")
+                    st.markdown(f"**PE:** {stock_data['pe']:.1f}")
+                    st.markdown(f"**PB:** {stock_data['pb']:.1f}")
+                    st.markdown(f"**ROE:** {stock_data['roe']:.1f}%")
+                    st.markdown(f"**Debt/Equity:** {stock_data['debt_to_equity']:.2f}")
+                    st.markdown(f"**Current Price:** {format_inr(stock_data['current_price'])}")
+
+                # What makes it a dark horse
+                st.markdown("#### What makes it a Dark Horse?")
+                reasons = []
+                if stock_data['pe'] < 15:
+                    reasons.append(f"✓ Attractive valuation with PE of {stock_data['pe']:.1f}")
+                if stock_data['ocf_score'] > 20:
+                    reasons.append("✓ Strong operating cash flow generation")
+                if stock_data['roe'] > 18:
+                    reasons.append(f"✓ High return on equity at {stock_data['roe']:.1f}%")
+                if stock_data['debt_to_equity'] < 0.3:
+                    reasons.append(f"✓ Low debt with D/E ratio of {stock_data['debt_to_equity']:.2f}")
+                if not reasons:
+                    reasons.append("✓ Balanced fundamentals across multiple metrics")
+
+                for reason in reasons:
+                    st.markdown(f"- {reason}")
+
+                # Risk factors
+                if stock_data['risk_flag']:
+                    st.markdown("#### Risk Factors")
+                    risks = stock_data['risk_flag'].split(", ")
+                    for risk in risks:
+                        st.markdown(f"- ⚠️ {risk}")
+
+                # Score breakdown (simple bar chart)
+                st.markdown("#### Score Breakdown")
+                score_components = {
+                    "PE Score": 15,
+                    "EPS Growth": 15,
+                    "Debt + ROE": 15,
+                    "Institutional Interest": 15,
+                    "Price Position": 15,
+                    "OCF Score": 25,
+                }
+
+                # Estimate component scores based on total score
+                estimated_scores = {}
+                remaining_score = stock_data['score']
+                for component, max_score in score_components.items():
+                    if component == "OCF Score":
+                        estimated_scores[component] = stock_data['ocf_score']
+                        remaining_score -= stock_data['ocf_score']
+                    else:
+                        # Distribute remaining score proportionally
+                        component_score = min(max_score, max_score * (remaining_score / sum(v for k, v in score_components.items() if k != "OCF Score")))
+                        estimated_scores[component] = round(component_score, 1)
+
+                score_df = pd.DataFrame([
+                    {"Component": k, "Score": v, "Max": score_components[k]}
+                    for k, v in estimated_scores.items()
+                ])
+
+                score_fig = px.bar(
+                    score_df,
+                    x="Component",
+                    y="Score",
+                    color="Score",
+                    color_continuous_scale="RdYlGn",
+                    range_y=[0, 25],
+                    title="Score Breakdown by Component",
+                )
+                apply_chart_theme(score_fig, height=300)
+                st.plotly_chart(score_fig, use_container_width=True)
+
         # Sector distribution
         if results:
             st.markdown("### Sector Distribution")
@@ -3351,7 +3466,20 @@ with tab_scanner:
                 {"Sector": k, "Count": v}
                 for k, v in sorted(sectors.items(), key=lambda x: -x[1])
             ])
-            st.dataframe(sector_df, use_container_width=True, hide_index=True)
+
+            # Create heatmap-style visualization using bar chart
+            sector_fig = px.bar(
+                sector_df,
+                x="Count",
+                y="Sector",
+                orientation="h",
+                color="Count",
+                color_continuous_scale="RdYlGn",
+                title="Dark Horses by Sector",
+            )
+            apply_chart_theme(sector_fig, height=300)
+            sector_fig.update_layout(yaxis={"categoryorder": "total ascending"})
+            st.plotly_chart(sector_fig, use_container_width=True)
 
     else:
         st.info("Click 'Run Scanner' to start screening stocks.")

@@ -3134,6 +3134,28 @@ with tab_scanner:
             "CIPLA.NS", "GRASIM.NS", "WELCORP.NS", "DLF.NS", "BRITANNIA.NS",
             "EICHERMOT.NS", "HEROMOTOCO.NS", "ACC.NS", "AMBUJACEM.NS", "ZOMATO.NS",
             "DMART.NS", "PERSISTENT.NS", "TRENT.NS", "APOLLOHOSP.NS", "BERGEPAINT.NS",
+            # Additional stocks for 100+ screening
+            "GODREJCP.NS", "HINDALCO.NS", "TATASTEEL.NS", "JSWSTEEL.NS", "COALINDIA.NS",
+            "ONGC.NS", "IOC.NS", "BPCL.NS", "GAIL.NS", "MUTHOOTFIN.NS",
+            "BAJAJFINSV.NS", "CHOLAHLDNG.NS", "IBULHSGFIN.NS", "MFIN.NS", "TATASTEEL.NS",
+            "UPL.NS", "DABUR.NS", "GODREJPROP.NS", "PIIND.NS", "LUPIN.NS",
+            "CADILAHC.NS", "AUROPHARMA.NS", "ALKEM.NS", "BIOCON.NS", "JUBLPHARM.NS",
+            "MRF.NS", "APOLLOTYRE.NS", "CEAT.NS", "JKTYRE.NS", "BRIDGETYRE.NS",
+            "EXIDEIND.NS", "AMARAJABAT.NS", "HCLTECH.NS", "TECHM.NS", "MPHASIS.NS",
+            "LTIM.NS", "COFORGE.NS", "PERSISTENT.NS", "TATAELXSI.NS", "LTIM.NS",
+            "IDFCFIRSTB.NS", "FEDERALBNK.NS", "BANDHANBNK.NS", "RBLBANK.NS", "INDUSINDBK.NS",
+            "AUBANK.NS", "J&KBANK.NS", "KARURVYSYA.NS", "SOUTHBANK.NS", "DCBBANK.NS",
+            "TATACHEM.NS", "NAVINFLUOR.NS", "PIIND.NS", "SRF.NS", "DEEPAKNTR.NS",
+            "GUJALKALI.NS", "TATACONSUM.NS", "BRITANNIA.NS", "HINDUNILVR.NS", "ITC.NS",
+            "NESTLEIND.NS", "DMART.NS", "TRENT.NS", "VBL.NS", "TANLA.NS",
+            "GRINDWELL.NS", "SANDHAR.NS", "BALKRISIND.NS", "MOTHERSON.NS", "BOSCHLTD.NS",
+            "M&MFIN.NS", "BAJFINANCE.NS", "CHOLAFIN.NS", "MUTHOOTFIN.NS", "MANAPPURAM.NS",
+            "TATAPOWER.NS", "ADANIPORTS.NS", "GMRINFRA.NS", "L&TINFRA.NS", "IRB.NS",
+            "PNCINFRA.NS", "RECLTD.NS", "PFC.NS", "REC.NS", "HUDCO.NS",
+            "DLF.NS", "GODREJPROP.NS", "BRIGADE.NS", "PHOENIXLTD.NS", "OBEROIRLTY.NS",
+            "PRESTIGE.NS", "GODREJWOOD.NS", "MAHINDRALIFE.NS", "HDFCLIFE.NS", "ICICIPRULI.NS",
+            "SBILIFE.NS", "MAXFIN.NS", "PNBGRIFFIN.NS", "TATAMOTORS.NS", "M&M.NS",
+            "MARUTI.NS", "EICHERMOT.NS", "BAJAJ-AUTO.NS", "HEROMOTOCO.NS", "TATAMTRDVR.NS",
         ]
 
         # Limit to selected number
@@ -3305,13 +3327,22 @@ with tab_scanner:
 
         # Sort by score
         results.sort(key=lambda x: x["score"], reverse=True)
-        results = [r for r in results if r["score"] >= min_score]
 
-        st.session_state["scanner_results"] = results
+        # Filter by min_score
+        filtered_results = [r for r in results if r["score"] >= min_score]
+
+        # If no results meet criteria, show top 3 from all scanned stocks
+        if not filtered_results and results:
+            filtered_results = results[:3]
+            st.warning(f"No stocks met your minimum score of {min_score}. Showing top 3 candidates from scanned stocks.")
+        elif not filtered_results and not results:
+            st.warning("No stocks passed the fundamental filters. Try adjusting your criteria.")
+
+        st.session_state["scanner_results"] = filtered_results
         st.session_state["scanner_skipped"] = skipped
         st.session_state["scanner_timestamp"] = datetime.now().strftime("%d %b %Y, %I:%M %p")
 
-        st.success(f"Scan complete! Found {len(results)} dark horse candidates out of {len(stocks_to_screen)} stocks screened.")
+        st.success(f"Scan complete! Found {len(filtered_results)} dark horse candidates out of {len(stocks_to_screen)} stocks screened.")
         st.rerun()
 
     # Display results

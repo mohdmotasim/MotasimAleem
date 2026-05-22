@@ -3176,7 +3176,7 @@ with tab_scanner:
                 data = fetch_stock_data(sym)
                 info = yf.Ticker(sym).info or {}
 
-                # Fundamental filters
+                # Fundamental metrics (for scoring, not strict filtering)
                 pe = _safe_float(info.get("trailingPE") or info.get("forwardPE"))
                 pb = _safe_float(info.get("priceToBook"))
                 debt_to_equity = _safe_float(info.get("debtToEquity"))
@@ -3194,29 +3194,8 @@ with tab_scanner:
                 if promoter_holding and promoter_holding <= 1:
                     promoter_holding *= 100
 
-                # Apply filters
-                if pe is None or not (5 <= pe <= 25):
-                    skipped += 1
-                    continue
-                if pb is None or pb >= 3:
-                    skipped += 1
-                    continue
-                if debt_to_equity is None or debt_to_equity >= 0.5:
-                    skipped += 1
-                    continue
-                if revenue_growth is None or revenue_growth <= 10:
-                    skipped += 1
-                    continue
-                if eps_growth is None or eps_growth <= 10:
-                    skipped += 1
-                    continue
-                if roe is None or roe <= 12:
-                    skipped += 1
-                    continue
-                if market_cap is None or not (5e9 <= market_cap <= 1e11):  # 500 Cr to 10,000 Cr
-                    skipped += 1
-                    continue
-                if promoter_holding is None or promoter_holding <= 40:
+                # Skip if essential data is missing
+                if pe is None or pb is None or roe is None:
                     skipped += 1
                     continue
 
@@ -3332,11 +3311,12 @@ with tab_scanner:
         filtered_results = [r for r in results if r["score"] >= min_score]
 
         # If no results meet criteria, show top 3 from all scanned stocks
-        if not filtered_results and results:
-            filtered_results = results[:3]
-            st.warning(f"No stocks met your minimum score of {min_score}. Showing top 3 candidates from scanned stocks.")
-        elif not filtered_results and not results:
-            st.warning("No stocks passed the fundamental filters. Try adjusting your criteria.")
+        if not filtered_results:
+            if results:
+                filtered_results = results[:3]
+                st.warning(f"No stocks met your minimum score of {min_score}. Showing top 3 candidates from scanned stocks.")
+            else:
+                st.warning("No stocks had sufficient data for analysis. Try again later or check your internet connection.")
 
         st.session_state["scanner_results"] = filtered_results
         st.session_state["scanner_skipped"] = skipped

@@ -174,9 +174,75 @@ CONVICTION_STATE_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), ".data", "conviction_state.json"
 )
 
+HOLDINGS_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), ".data", "holdings.json"
+)
+
 
 def _default_conviction_tiers() -> dict[str, list[str]]:
     return {"1": list(DEFAULT_WATCHLIST), "2": [], "3": []}
+
+
+def _default_holdings() -> list[dict]:
+    return []
+
+
+def _load_holdings_from_disk() -> list[dict] | None:
+    if not os.path.isfile(HOLDINGS_FILE):
+        return None
+    try:
+        with open(HOLDINGS_FILE, encoding="utf-8") as handle:
+            data = json.load(handle)
+        if not isinstance(data, list):
+            return None
+        return data
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+
+
+def _save_holdings_to_disk(holdings: list[dict]) -> None:
+    try:
+        os.makedirs(os.path.dirname(HOLDINGS_FILE), exist_ok=True)
+        with open(HOLDINGS_FILE, "w", encoding="utf-8") as handle:
+            json.dump(holdings, handle, indent=2)
+    except OSError:
+        pass
+
+
+def get_holdings() -> list[dict]:
+    if "holdings" not in st.session_state:
+        loaded = _load_holdings_from_disk()
+        st.session_state["holdings"] = loaded if loaded else _default_holdings()
+    return st.session_state["holdings"]
+
+
+def add_holding(symbol: str, quantity: float, purchase_price: float) -> None:
+    holdings = get_holdings()
+    holdings.append({
+        "symbol": symbol,
+        "quantity": quantity,
+        "purchase_price": purchase_price,
+        "added_date": datetime.now().strftime("%Y-%m-%d"),
+    })
+    st.session_state["holdings"] = holdings
+    _save_holdings_to_disk(holdings)
+
+
+def remove_holding(index: int) -> None:
+    holdings = get_holdings()
+    if 0 <= index < len(holdings):
+        holdings.pop(index)
+        st.session_state["holdings"] = holdings
+        _save_holdings_to_disk(holdings)
+
+
+def update_holding(index: int, quantity: float, purchase_price: float) -> None:
+    holdings = get_holdings()
+    if 0 <= index < len(holdings):
+        holdings[index]["quantity"] = quantity
+        holdings[index]["purchase_price"] = purchase_price
+        st.session_state["holdings"] = holdings
+        _save_holdings_to_disk(holdings)
 
 
 def _normalize_tiers(tiers: dict) -> dict[str, list[str]]:
@@ -893,12 +959,14 @@ def generate_news_decision_summary(
 
 
 DARK_HORSE_WEIGHTS = {
-    "fcf_yield": 0.25,
-    "revenue_cagr": 0.20,
-    "analyst_inverse": 0.15,
-    "inst_inverse": 0.15,
-    "insider_ratio": 0.15,
+    "fcf_yield": 0.20,
+    "revenue_cagr": 0.15,
+    "analyst_inverse": 0.10,
+    "inst_inverse": 0.10,
+    "insider_ratio": 0.10,
     "gm_trend": 0.10,
+    "pe_ratio": 0.15,
+    "operating_cashflow": 0.10,
 }
 
 SECTOR_FCF_PEERS: dict[str, list[str]] = {
@@ -1108,6 +1176,32 @@ def compute_dark_horse_score(sym: str, info: dict, ticker: yf.Ticker) -> dict:
     weighted_total += comp_score * DARK_HORSE_WEIGHTS["gm_trend"]
     weight_used += DARK_HORSE_WEIGHTS["gm_trend"]
 
+    # P/E ratio component - lower P/E is generally better for value
+    pe_ratio = _safe_float(info.get("trailingPE") or info.get("forwardPE"))
+    if pe_ratio is not None and pe_ratio > 0:
+        comp_score = _scale_linear(50 - pe_ratio, 0, 50)
+        detail = f"P/E ratio {pe_ratio:.2f} (lower = higher score)"
+    else:
+        comp_score = 50.0
+        detail = "P/E ratio unavailable"
+    components["pe_ratio"] = {"score": comp_score, "weight_pct": 15, "detail": detail}
+    weighted_total += comp_score * DARK_HORSE_WEIGHTS["pe_ratio"]
+    weight_used += DARK_HORSE_WEIGHTS["pe_ratio"]
+
+    # Operating cash flow component - higher is better
+    ocf = _safe_float(info.get("operatingCashflow"))
+    mcap = _safe_float(info.get("marketCap"))
+    if ocf is not None and mcap is not None and mcap > 0:
+        ocf_yield = ocf / mcap
+        comp_score = _scale_linear(ocf_yield * 100, 0, 15)
+        detail = f"Operating cash flow yield {ocf_yield*100:.2f}%"
+    else:
+        comp_score = 50.0
+        detail = "Operating cash flow unavailable"
+    components["operating_cashflow"] = {"score": comp_score, "weight_pct": 10, "detail": detail}
+    weighted_total += comp_score * DARK_HORSE_WEIGHTS["operating_cashflow"]
+    weight_used += DARK_HORSE_WEIGHTS["operating_cashflow"]
+
     final_score = weighted_total / weight_used if weight_used else 50.0
     if final_score >= 70:
         tier = "green"
@@ -1117,12 +1211,14 @@ def compute_dark_horse_score(sym: str, info: dict, ticker: yf.Ticker) -> dict:
         tier = "red"
 
     breakdown_lines = [
-        f"FCF yield (25%): {components['fcf_yield']['score']:.0f}/100 — {components['fcf_yield']['detail']}",
-        f"Revenue growth (20%): {components['revenue_cagr']['score']:.0f}/100 — {components['revenue_cagr']['detail']}",
-        f"Analyst coverage ↓ (15%): {components['analyst_inverse']['score']:.0f}/100 — {components['analyst_inverse']['detail']}",
-        f"Institutional own. ↓ (15%): {components['inst_inverse']['score']:.0f}/100 — {components['inst_inverse']['detail']}",
-        f"Insider buy/sell (15%): {components['insider_ratio']['score']:.0f}/100 — {components['insider_ratio']['detail']}",
+        f"FCF yield (20%): {components['fcf_yield']['score']:.0f}/100 — {components['fcf_yield']['detail']}",
+        f"Revenue growth (15%): {components['revenue_cagr']['score']:.0f}/100 — {components['revenue_cagr']['detail']}",
+        f"Analyst coverage ↓ (10%): {components['analyst_inverse']['score']:.0f}/100 — {components['analyst_inverse']['detail']}",
+        f"Institutional own. ↓ (10%): {components['inst_inverse']['score']:.0f}/100 — {components['inst_inverse']['detail']}",
+        f"Insider buy/sell (10%): {components['insider_ratio']['score']:.0f}/100 — {components['insider_ratio']['detail']}",
         f"Gross margin trend (10%): {components['gm_trend']['score']:.0f}/100 — {components['gm_trend']['detail']}",
+        f"P/E ratio (15%): {components['pe_ratio']['score']:.0f}/100 — {components['pe_ratio']['detail']}",
+        f"Operating cash flow (10%): {components['operating_cashflow']['score']:.0f}/100 — {components['operating_cashflow']['detail']}",
     ]
 
     return {
@@ -2748,14 +2844,16 @@ if add_clicked:
     if not query:
         st.warning("Enter a stock to add to the watchlist.")
     else:
-        valid, ticker, _ = search_nse_stock(query)
+        valid, ticker, display_name = search_nse_stock(query)
         if not valid:
             nse_not_found_error(query)
         else:
-            if ticker not in get_watchlist():
+            if ticker in get_watchlist():
+                st.info(f"{ticker} is already in your watchlist.")
+            else:
                 add_to_conviction(ticker, "1")
+                st.success(f"Added {ticker} ({display_name}) to watchlist.")
             st.session_state["selected_symbol"] = ticker
-            st.success(f"Added {ticker} to watchlist.")
             st.rerun()
 
 st.sidebar.markdown("### Conviction watchlist")
@@ -2788,7 +2886,7 @@ if compare_on:
     else:
         st.session_state["compare_symbol"] = ""
 
-tab_research, tab_portfolio_health = st.tabs(["Research", "Portfolio Health"])
+tab_research, tab_portfolio_health, tab_holdings = st.tabs(["Research", "Portfolio Health", "Current Holdings"])
 
 selected = st.session_state.get("selected_symbol")
 compare_symbol = st.session_state.get("compare_symbol", "")
@@ -2817,6 +2915,145 @@ with tab_research:
 
 with tab_portfolio_health:
     render_portfolio_health_tab()
+
+with tab_holdings:
+    render_section_header(
+        "Current Holdings",
+        "Track your actual positions with quantity, purchase price, and profit/loss calculation."
+    )
+
+    holdings = get_holdings()
+
+    # Add new holding form
+    with st.expander("Add new holding", expanded=False):
+        add_col1, add_col2, add_col3, add_col4 = st.columns(4)
+        with add_col1:
+            new_symbol = st.text_input("Symbol", placeholder="e.g. RELIANCE.NS", key="add_holding_symbol")
+        with add_col2:
+            new_qty = st.number_input("Quantity", min_value=0.0, step=1.0, value=0.0, key="add_holding_qty")
+        with add_col3:
+            new_price = st.number_input("Purchase Price (INR)", min_value=0.0, step=1.0, value=0.0, key="add_holding_price")
+        with add_col4:
+            add_holding_btn = st.button("Add", use_container_width=True, key="add_holding_btn")
+
+        if add_holding_btn:
+            if new_symbol and new_qty > 0 and new_price > 0:
+                symbol = new_symbol.strip().upper()
+                if not symbol.endswith(NSE_SUFFIX):
+                    symbol = f"{symbol}{NSE_SUFFIX}"
+                add_holding(symbol, new_qty, new_price)
+                st.success(f"Added {symbol} to holdings.")
+                st.rerun()
+            else:
+                st.warning("Please fill in all fields with valid values.")
+
+    if not holdings:
+        st.info("No holdings yet. Add your first holding using the form above.")
+    else:
+        # Fetch current prices for all holdings
+        holdings_data = []
+        total_invested = 0.0
+        total_current_value = 0.0
+
+        for holding in holdings:
+            symbol = holding["symbol"]
+            qty = holding["quantity"]
+            purchase_price = holding["purchase_price"]
+
+            try:
+                stock_data = fetch_stock_data(symbol)
+                current_price = stock_data.get("current_price")
+                name = stock_data.get("name", symbol.removesuffix(NSE_SUFFIX))
+            except Exception:
+                current_price = None
+                name = symbol.removesuffix(NSE_SUFFIX)
+
+            invested = qty * purchase_price
+            current_value = qty * current_price if current_price else 0
+            profit_loss = current_value - invested
+            profit_loss_pct = (profit_loss / invested * 100) if invested > 0 else 0
+
+            total_invested += invested
+            total_current_value += current_value
+
+            holdings_data.append({
+                "symbol": symbol,
+                "name": name,
+                "quantity": qty,
+                "purchase_price": purchase_price,
+                "current_price": current_price,
+                "invested": invested,
+                "current_value": current_value,
+                "profit_loss": profit_loss,
+                "profit_loss_pct": profit_loss_pct,
+            })
+
+        # Summary metrics
+        total_profit_loss = total_current_value - total_invested
+        total_profit_loss_pct = (total_profit_loss / total_invested * 100) if total_invested > 0 else 0
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Total Invested", format_inr(total_invested))
+        m2.metric("Current Value", format_inr(total_current_value))
+        m3.metric(
+            "Total Profit/Loss",
+            f"{format_inr(total_profit_loss)} ({total_profit_loss_pct:+.2f}%)",
+            delta=f"{total_profit_loss_pct:+.2f}%" if total_profit_loss != 0 else None,
+        )
+
+        # Holdings table
+        st.markdown("### Holdings Detail")
+        display_data = []
+        for idx, h in enumerate(holdings_data):
+            display_data.append({
+                "Symbol": h["symbol"],
+                "Name": h["name"],
+                "Quantity": h["quantity"],
+                "Purchase Price": format_inr(h["purchase_price"]),
+                "Current Price": format_inr(h["current_price"]) if h["current_price"] else "N/A",
+                "Invested": format_inr(h["invested"]),
+                "Current Value": format_inr(h["current_value"]),
+                "Profit/Loss": f"{format_inr(h['profit_loss'])} ({h['profit_loss_pct']:+.2f}%)",
+            })
+
+        df = pd.DataFrame(display_data)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        # Edit/Remove holdings
+        st.markdown("### Manage Holdings")
+        for idx, holding in enumerate(holdings):
+            with st.expander(f"{holding['symbol']} - {holding['quantity']} shares @ {format_inr(holding['purchase_price'])}"):
+                edit_col1, edit_col2, edit_col3, edit_col4, edit_col5 = st.columns(5)
+                with edit_col1:
+                    edit_qty = st.number_input(
+                        "Quantity",
+                        min_value=0.0,
+                        step=1.0,
+                        value=holding["quantity"],
+                        key=f"edit_qty_{idx}",
+                    )
+                with edit_col2:
+                    edit_price = st.number_input(
+                        "Purchase Price",
+                        min_value=0.0,
+                        step=1.0,
+                        value=holding["purchase_price"],
+                        key=f"edit_price_{idx}",
+                    )
+                with edit_col3:
+                    update_btn = st.button("Update", key=f"update_{idx}", use_container_width=True)
+                with edit_col4:
+                    remove_btn = st.button("Remove", key=f"remove_{idx}", use_container_width=True)
+
+                if update_btn:
+                    update_holding(idx, edit_qty, edit_price)
+                    st.success(f"Updated {holding['symbol']}.")
+                    st.rerun()
+
+                if remove_btn:
+                    remove_holding(idx)
+                    st.success(f"Removed {holding['symbol']}.")
+                    st.rerun()
 
 last_refresh = datetime.now().strftime("%d %b %Y, %I:%M:%S %p")
 st.markdown(

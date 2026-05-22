@@ -469,24 +469,58 @@ def infer_mega_trend(data: dict) -> str:
 
 def build_portfolio_holdings() -> list[dict]:
     holdings: list[dict] = []
-    for sym in all_conviction_symbols():
-        meta = get_conviction_meta(sym)
-        alloc = float(meta.get("allocation_pct") or 0.0)
-        if alloc <= 0:
-            continue
-        data = fetch_stock_data(sym)
-        short = sym.removesuffix(NSE_SUFFIX)
-        holdings.append(
-            {
-                "symbol": sym,
-                "short_label": short,
-                "name": data.get("name") or short,
-                "allocation_pct": alloc,
-                "sector": data.get("sector") or "Unknown",
-                "mega_trend": infer_mega_trend(data),
-                "history_1y": data.get("history_1y"),
-            }
-        )
+    # Use actual holdings data instead of conviction tiers
+    current_holdings = get_holdings()
+
+    if not current_holdings:
+        # Fallback to conviction tiers with allocation if no holdings exist
+        for sym in all_conviction_symbols():
+            meta = get_conviction_meta(sym)
+            alloc = float(meta.get("allocation_pct") or 0.0)
+            if alloc <= 0:
+                continue
+            data = fetch_stock_data(sym)
+            short = sym.removesuffix(NSE_SUFFIX)
+            holdings.append(
+                {
+                    "symbol": sym,
+                    "short_label": short,
+                    "name": data.get("name") or short,
+                    "allocation_pct": alloc,
+                    "sector": data.get("sector") or "Unknown",
+                    "mega_trend": infer_mega_trend(data),
+                    "history_1y": data.get("history_1y"),
+                }
+            )
+    else:
+        # Build holdings from actual positions
+        total_invested = 0.0
+        for holding in current_holdings:
+            qty = holding["quantity"]
+            purchase_price = holding["purchase_price"]
+            invested = qty * purchase_price
+            total_invested += invested
+
+        for holding in current_holdings:
+            sym = holding["symbol"]
+            qty = holding["quantity"]
+            purchase_price = holding["purchase_price"]
+            invested = qty * purchase_price
+            data = fetch_stock_data(sym)
+            short = sym.removesuffix(NSE_SUFFIX)
+            # Calculate allocation percentage based on invested amount
+            alloc_pct = (invested / total_invested * 100) if total_invested > 0 else 0
+            holdings.append(
+                {
+                    "symbol": sym,
+                    "short_label": short,
+                    "name": data.get("name") or short,
+                    "allocation_pct": alloc_pct,
+                    "sector": data.get("sector") or "Unknown",
+                    "mega_trend": infer_mega_trend(data),
+                    "history_1y": data.get("history_1y"),
+                }
+            )
     return holdings
 
 
@@ -2804,14 +2838,32 @@ with st.container(border=True):
                             f"{company_name[:48]}</p></div>",
                             unsafe_allow_html=True,
                         )
-                        if st.button(
-                            "Open",
-                            key=f"fuzzy_pick_{sym}_{idx}",
-                            use_container_width=True,
-                            help=f"Load {sym} — {company_name}",
-                        ):
-                            st.session_state["selected_symbol"] = f"{sym}{NSE_SUFFIX}"
-                            st.rerun()
+                        btn_col1, btn_col2 = st.columns(2)
+                        with btn_col1:
+                            if st.button(
+                                "Open",
+                                key=f"fuzzy_pick_{sym}_{idx}",
+                                use_container_width=True,
+                                help=f"Load {sym} — {company_name}",
+                            ):
+                                st.session_state["selected_symbol"] = f"{sym}{NSE_SUFFIX}"
+                                st.session_state["nse_search_input"] = ""
+                                st.rerun()
+                        with btn_col2:
+                            ticker_with_suffix = f"{sym}{NSE_SUFFIX}"
+                            if st.button(
+                                "+ Add",
+                                key=f"fuzzy_add_{sym}_{idx}",
+                                use_container_width=True,
+                                help=f"Add {sym} to watchlist",
+                            ):
+                                if ticker_with_suffix in get_watchlist():
+                                    st.info(f"{ticker_with_suffix} is already in your watchlist.")
+                                else:
+                                    add_to_conviction(ticker_with_suffix, "1")
+                                    st.success(f"Added {ticker_with_suffix} to watchlist.")
+                                st.session_state["nse_search_input"] = ""
+                                st.rerun()
             else:
                 st.caption("No NSE matches yet — keep typing or try the full ticker.")
     with top_mid:
@@ -2837,6 +2889,7 @@ if search_clicked:
             nse_not_found_error(query)
         else:
             st.session_state["selected_symbol"] = ticker
+            st.session_state["nse_search_input"] = ""
             st.rerun()
 
 if add_clicked:
@@ -2846,7 +2899,7 @@ if add_clicked:
     else:
         valid, ticker, display_name = search_nse_stock(query)
         if not valid:
-            nse_not_found_error(query)
+            st.error(f"Could not find '{query}' on NSE. Try the full ticker (e.g., RELIANCE, TCS, HDFCBANK).")
         else:
             if ticker in get_watchlist():
                 st.info(f"{ticker} is already in your watchlist.")
@@ -2854,6 +2907,7 @@ if add_clicked:
                 add_to_conviction(ticker, "1")
                 st.success(f"Added {ticker} ({display_name}) to watchlist.")
             st.session_state["selected_symbol"] = ticker
+            st.session_state["nse_search_input"] = ""
             st.rerun()
 
 st.sidebar.markdown("### Conviction watchlist")

@@ -1353,11 +1353,11 @@ SECTOR_STOCKS = {
 }
 
 
-def render_sector_stocks() -> None:
-    """Display top 4 stocks from each sector with key metrics."""
+@st.cache_data(ttl=604800)  # Cache for 7 days (1 week)
+def fetch_sector_stocks_data() -> dict:
+    """Fetch and cache sector stocks data for 1 week."""
+    sector_data_dict = {}
     for sector, stocks in SECTOR_STOCKS.items():
-        st.sidebar.markdown(f"**{sector}**")
-        
         sector_data = []
         for sym in stocks[:4]:  # Get top 4 stocks
             try:
@@ -1390,38 +1390,59 @@ def render_sector_stocks() -> None:
             except Exception:
                 pass
         
-        # Sort by market cap (descending) and display top 4
+        # Sort by market cap (descending) and keep top 4
         sector_data.sort(key=lambda x: x["market_cap"] or 0, reverse=True)
-        
-        for stock in sector_data[:4]:
-            with st.sidebar.container():
-                # Display stock name and price
-                name_col, price_col = st.sidebar.columns([2, 1])
-                with name_col:
-                    st.sidebar.markdown(f"**{stock['name']}**")
-                with price_col:
-                    st.sidebar.markdown(f"₹{stock['price']:.0f}")
+        sector_data_dict[sector] = sector_data[:4]
+    
+    return sector_data_dict
+
+
+def render_sector_stocks() -> None:
+    """Display top 4 stocks from each sector with key metrics in compact format."""
+    sector_data_dict = fetch_sector_stocks_data()
+    
+    for sector, stocks in sector_data_dict.items():
+        with st.sidebar.container():
+            # Compact sector header
+            st.sidebar.markdown(f"<small style='font-size: 0.85rem; font-weight: bold;'>{sector}</small>", unsafe_allow_html=True)
+            
+            # Create compact table-like display
+            for stock in stocks:
+                # Single row per stock with all info
+                cols = st.sidebar.columns([2, 1.2, 0.8, 0.8])
                 
-                # Display metrics
-                metrics_col = st.sidebar.columns(2)
-                with metrics_col[0]:
+                with cols[0]:
+                    # Stock name (smaller font)
+                    st.sidebar.markdown(f"<small style='font-size: 0.75rem;'>{stock['name']}</small>", unsafe_allow_html=True)
+                
+                with cols[1]:
+                    # Price (smaller font)
+                    st.sidebar.markdown(f"<small style='font-size: 0.75rem;'>₹{stock['price']:.0f}</small>", unsafe_allow_html=True)
+                
+                with cols[2]:
+                    # PE (smaller font)
                     if stock['pe']:
-                        st.sidebar.caption(f"PE: {stock['pe']:.1f}")
+                        st.sidebar.markdown(f"<small style='font-size: 0.75rem;'>PE:{stock['pe']:.1f}</small>", unsafe_allow_html=True)
                     else:
-                        st.sidebar.caption("PE: N/A")
-                with metrics_col[1]:
+                        st.sidebar.markdown("<small style='font-size: 0.75rem;'>PE:-</small>", unsafe_allow_html=True)
+                
+                with cols[3]:
+                    # 1-week change with color (smaller font)
                     if stock['change_1w'] is not None:
-                        change_color = "🟢" if stock['change_1w'] >= 0 else "🔴"
-                        st.sidebar.caption(f"{change_color} {stock['change_1w']:+.1f}%")
+                        change_color = "green" if stock['change_1w'] >= 0 else "red"
+                        st.sidebar.markdown(f"<small style='font-size: 0.75rem; color: {change_color};'>{stock['change_1w']:+.1f}%</small>", unsafe_allow_html=True)
                     else:
-                        st.sidebar.caption("1W: N/A")
-                
-                # Add open button
-                if st.sidebar.button("Open", key=f"sector_open_{stock['symbol']}", use_container_width=True):
-                    st.session_state["selected_symbol"] = stock['symbol']
-                    st.rerun()
-                
-                st.sidebar.markdown("---")
+                        st.sidebar.markdown("<small style='font-size: 0.75rem;'>-</small>", unsafe_allow_html=True)
+            
+            # Add open buttons in a compact row
+            btn_cols = st.sidebar.columns(len(stocks))
+            for idx, stock in enumerate(stocks):
+                with btn_cols[idx]:
+                    if st.sidebar.button("📊", key=f"sector_open_{stock['symbol']}", help=f"Open {stock['name']}", use_container_width=True):
+                        st.session_state["selected_symbol"] = stock['symbol']
+                        st.rerun()
+            
+            st.sidebar.markdown("<hr style='margin: 8px 0;'>", unsafe_allow_html=True)
 
 def render_dark_horse_badge(data: dict) -> None:
     dh = data.get("dark_horse")

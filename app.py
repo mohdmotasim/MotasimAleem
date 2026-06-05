@@ -3189,13 +3189,30 @@ with tab_scanner:
                 roe = _safe_float(info.get("returnOnEquity"))
                 if roe and abs(roe) <= 1:
                     roe *= 100
+                roce = _safe_float(info.get("returnOnAssets"))  # Proxy for ROCE
+                if roce and abs(roce) <= 1:
+                    roce *= 100
                 market_cap = _safe_float(info.get("marketCap"))
                 promoter_holding = _safe_float(info.get("heldPercentInsiders"))
                 if promoter_holding and promoter_holding <= 1:
                     promoter_holding *= 100
 
+                # Calculate 50 DMA and 200 DMA from historical data
+                dma_50 = None
+                dma_200 = None
+                try:
+                    hist = yf.Ticker(sym).history(period="1y")
+                    if len(hist) >= 50:
+                        dma_50 = hist['Close'].tail(50).mean()
+                    if len(hist) >= 200:
+                        dma_200 = hist['Close'].tail(200).mean()
+                except:
+                    pass
+
+                current_price = data.get("current_price")
+
                 # Skip if essential data is missing
-                if pe is None or pb is None or roe is None:
+                if pe is None or pb is None or roe is None or current_price is None:
                     skipped += 1
                     continue
 
@@ -3224,7 +3241,6 @@ with tab_scanner:
                 # Price position score (15 pts) - near 52-week low
                 week_52_low = data.get("week_52_low")
                 week_52_high = data.get("week_52_high")
-                current_price = data.get("current_price")
                 if week_52_low and week_52_high and current_price:
                     position_52w = (current_price - week_52_low) / (week_52_high - week_52_low) * 100
                     price_score = max(0, min(15, (50 - position_52w) / 50 * 15))
@@ -3232,6 +3248,58 @@ with tab_scanner:
                 else:
                     price_score = 7.5
                     score += price_score
+
+                # ROCE score (10 pts) - higher is better
+                if roce:
+                    roce_score = max(0, min(10, (roce - 10) / 20 * 10))
+                    score += roce_score
+                else:
+                    roce_score = 5
+                    score += roce_score
+
+                # DMA trend score (10 pts) - price above 50 DMA and 200 DMA
+                dma_score = 0
+                if dma_50 and dma_200:
+                    if current_price > dma_50 > dma_200:
+                        dma_score = 10  # Strong uptrend
+                    elif current_price > dma_50:
+                        dma_score = 7  # Above 50 DMA
+                    elif current_price > dma_200:
+                        dma_score = 5  # Above 200 DMA
+                    else:
+                        dma_score = 2  # Below both DMAs
+                elif dma_50:
+                    if current_price > dma_50:
+                        dma_score = 7
+                    else:
+                        dma_score = 3
+                else:
+                    dma_score = 5  # Default if DMA data unavailable
+                score += dma_score
+
+                # Entry/Exit point evaluation
+                entry_point = None
+                exit_point = None
+                entry_signal = "HOLD"
+                if dma_50 and dma_200 and current_price:
+                    # Entry point: near 50 DMA or 200 DMA support
+                    if current_price > dma_50:
+                        entry_point = dma_50
+                        if current_price < dma_50 * 1.02:  # Within 2% of 50 DMA
+                            entry_signal = "BUY"
+                    elif current_price > dma_200:
+                        entry_point = dma_200
+                        if current_price < dma_200 * 1.02:  # Within 2% of 200 DMA
+                            entry_signal = "BUY"
+                    else:
+                        entry_point = dma_200
+                        entry_signal = "WAIT"
+
+                    # Exit point: 15-20% above entry or near 52-week high
+                    if entry_point:
+                        exit_point = entry_point * 1.18  # 18% target
+                    if week_52_high:
+                        exit_point = min(exit_point, week_52_high * 0.95) if exit_point else week_52_high * 0.95
 
                 # OCF score (25 pts) - highest weight
                 ocf = _safe_float(info.get("operatingCashflow"))
@@ -3265,6 +3333,10 @@ with tab_scanner:
                     reasons.append(f"Low debt ({debt_to_equity:.2f})")
                 if roe > 18:
                     reasons.append(f"High ROE ({roe:.1f}%)")
+                if roce and roce > 15:
+                    reasons.append(f"High ROCE ({roce:.1f}%)")
+                if dma_score >= 7:
+                    reasons.append("Strong DMA trend")
                 if ocf_score > 20:
                     reasons.append("Strong cash generation")
 
@@ -3291,7 +3363,13 @@ with tab_scanner:
                     "pe": pe,
                     "pb": pb,
                     "roe": roe,
+                    "roce": roce,
                     "debt_to_equity": debt_to_equity,
+                    "dma_50": dma_50,
+                    "dma_200": dma_200,
+                    "entry_point": entry_point,
+                    "exit_point": exit_point,
+                    "entry_signal": entry_signal,
                     "reasoning": reasoning,
                     "risk_flag": risk_flag,
                 })
@@ -3372,18 +3450,23 @@ with tab_scanner:
         display_data = []
         for idx, r in enumerate(filtered_results, 1):
             score_color = "🟢" if r["score"] >= 80 else "🟡" if r["score"] >= 60 else "🔴"
+            signal_emoji = "🟢" if r.get("entry_signal") == "BUY" else "🟡" if r.get("entry_signal") == "HOLD" else "🔴"
             display_data.append({
                 "Rank": idx,
                 "Symbol": r["symbol"],
                 "Name": r["name"][:30],
                 "Sector": r["sector"][:20],
                 "Score": f"{score_color} {r['score']}",
-                "OCF Score": f"{r['ocf_score']}/25",
+                "Signal": f"{signal_emoji} {r.get('entry_signal', '-')}",
                 "Price": format_inr(r["current_price"]),
+                "50 DMA": format_inr(r.get("dma_50")) if r.get("dma_50") else "-",
+                "200 DMA": format_inr(r.get("dma_200")) if r.get("dma_200") else "-",
                 "PE": f"{r['pe']:.1f}",
-                "PB": f"{r['pb']:.1f}",
                 "ROE": f"{r['roe']:.1f}%",
+                "ROCE": f"{r.get('roce', 0):.1f}%" if r.get("roce") else "-",
                 "D/E": f"{r['debt_to_equity']:.2f}",
+                "Entry": format_inr(r.get("entry_point")) if r.get("entry_point") else "-",
+                "Exit": format_inr(r.get("exit_point")) if r.get("exit_point") else "-",
                 "Reasoning": r["reasoning"],
                 "Risk": r["risk_flag"] or "-",
             })
@@ -3412,8 +3495,14 @@ with tab_scanner:
                     st.markdown(f"**PE:** {stock_data['pe']:.1f}")
                     st.markdown(f"**PB:** {stock_data['pb']:.1f}")
                     st.markdown(f"**ROE:** {stock_data['roe']:.1f}%")
+                    if stock_data.get('roce'):
+                        st.markdown(f"**ROCE:** {stock_data['roce']:.1f}%")
                     st.markdown(f"**Debt/Equity:** {stock_data['debt_to_equity']:.2f}")
                     st.markdown(f"**Current Price:** {format_inr(stock_data['current_price'])}")
+                    if stock_data.get('dma_50'):
+                        st.markdown(f"**50 DMA:** {format_inr(stock_data['dma_50'])}")
+                    if stock_data.get('dma_200'):
+                        st.markdown(f"**200 DMA:** {format_inr(stock_data['dma_200'])}")
 
                 # What makes it a dark horse
                 st.markdown("#### What makes it a Dark Horse?")
@@ -3439,6 +3528,19 @@ with tab_scanner:
                     for risk in risks:
                         st.markdown(f"- ⚠️ {risk}")
 
+                # Entry/Exit recommendations
+                st.markdown("#### Entry & Exit Recommendations")
+                if stock_data.get('entry_signal'):
+                    signal_color = "🟢" if stock_data['entry_signal'] == "BUY" else "🟡" if stock_data['entry_signal'] == "HOLD" else "🔴"
+                    st.markdown(f"**Current Signal:** {signal_color} {stock_data['entry_signal']}")
+                if stock_data.get('entry_point'):
+                    st.markdown(f"**Suggested Entry Price:** {format_inr(stock_data['entry_point'])}")
+                if stock_data.get('exit_point'):
+                    st.markdown(f"**Target Exit Price:** {format_inr(stock_data['exit_point'])}")
+                    if stock_data.get('current_price') and stock_data.get('entry_point'):
+                        potential_gain = ((stock_data['exit_point'] - stock_data['entry_point']) / stock_data['entry_point']) * 100
+                        st.markdown(f"**Potential Gain:** {potential_gain:.1f}%")
+
                 # Score breakdown (simple bar chart)
                 st.markdown("#### Score Breakdown")
                 score_components = {
@@ -3447,6 +3549,8 @@ with tab_scanner:
                     "Debt + ROE": 15,
                     "Institutional Interest": 15,
                     "Price Position": 15,
+                    "ROCE Score": 10,
+                    "DMA Trend": 10,
                     "OCF Score": 25,
                 }
 

@@ -3188,66 +3188,87 @@ with tab_scanner:
                     skipped += 1
                     continue
 
-                # Calculate dark horse score
-                score = 0
-                ocf_score = 0
+                # Calculate dark horse score with new weighting system
+                value_score = 0
+                fundamentals_score = 0
+                momentum_score = 0
+                risk_penalty = 0
 
-                # PE score (15 pts) - lower is better
-                pe_score = max(0, min(15, (25 - pe) / 20 * 15))
-                score += pe_score
+                # VALUE CATEGORY (35 pts)
+                # PE vs sector (12 pts) - lower PE than sector average is better
+                sector_avg_pe = 20  # Simplified sector average (could be made sector-specific)
+                pe_vs_sector_score = max(0, min(12, (sector_avg_pe - pe) / 15 * 12)) if pe else 0
+                value_score += pe_vs_sector_score
 
-                # EPS growth score (15 pts)
-                eps_score = max(0, min(15, (eps_growth - 10) / 40 * 15))
-                score += eps_score
+                # PB score (8 pts) - lower PB is better
+                pb_score = max(0, min(8, (3 - pb) / 3 * 8)) if pb else 0
+                value_score += pb_score
 
-                # Debt + ROE score (15 pts)
-                debt_score = max(0, min(7.5, (0.5 - debt_to_equity) / 0.5 * 7.5))
-                roe_score = max(0, min(7.5, (roe - 12) / 28 * 7.5))
-                score += debt_score + roe_score
+                # Price vs 200DMA (8 pts) - price below 200DMA is better for value
+                if dma_200 and current_price:
+                    price_vs_200dma_score = max(0, min(8, (dma_200 - current_price) / dma_200 * 8))
+                else:
+                    price_vs_200dma_score = 4
+                value_score += price_vs_200dma_score
 
-                # Institutional interest score (15 pts) - proxy with volume
-                avg_volume = _safe_float(info.get("averageVolume"))
-                inst_score = 7.5 if avg_volume and avg_volume > 1000000 else 0
-                score += inst_score
-
-                # Price position score (15 pts) - near 52-week low
+                # Price vs 52w high (7 pts) - price closer to 52w low is better
                 week_52_low = data.get("week_52_low")
                 week_52_high = data.get("week_52_high")
                 if week_52_low and week_52_high and current_price:
                     position_52w = (current_price - week_52_low) / (week_52_high - week_52_low) * 100
-                    price_score = max(0, min(15, (50 - position_52w) / 50 * 15))
-                    score += price_score
+                    price_vs_52w_high_score = max(0, min(7, (100 - position_52w) / 100 * 7))
                 else:
-                    price_score = 7.5
-                    score += price_score
+                    price_vs_52w_high_score = 3.5
+                value_score += price_vs_52w_high_score
 
-                # ROCE score (10 pts) - higher is better
-                if roce:
-                    roce_score = max(0, min(10, (roce - 10) / 20 * 10))
-                    score += roce_score
-                else:
-                    roce_score = 5
-                    score += roce_score
+                # FUNDAMENTALS CATEGORY (40 pts)
+                # ROE score (15 pts) - higher ROE is better
+                roe_score = max(0, min(15, (roe - 10) / 20 * 15)) if roe else 0
+                fundamentals_score += roe_score
 
-                # DMA trend score (10 pts) - price above 50 DMA and 200 DMA
-                dma_score = 0
-                if dma_50 and dma_200:
-                    if current_price > dma_50 > dma_200:
-                        dma_score = 10  # Strong uptrend
-                    elif current_price > dma_50:
-                        dma_score = 7  # Above 50 DMA
-                    elif current_price > dma_200:
-                        dma_score = 5  # Above 200 DMA
-                    else:
-                        dma_score = 2  # Below both DMAs
-                elif dma_50:
-                    if current_price > dma_50:
-                        dma_score = 7
-                    else:
-                        dma_score = 3
+                # ROCE score (10 pts) - higher ROCE is better
+                roce_score = max(0, min(10, (roce - 10) / 20 * 10)) if roce else 0
+                fundamentals_score += roce_score
+
+                # OCF score (10 pts) - calculate operating cash flow score
+                operating_cash_flow = _safe_float(info.get("operatingCashflow"))
+                if operating_cash_flow and market_cap:
+                    ocf_ratio = (operating_cash_flow / market_cap) * 100
+                    ocf_score = max(0, min(10, (ocf_ratio - 5) / 15 * 10))
                 else:
-                    dma_score = 5  # Default if DMA data unavailable
-                score += dma_score
+                    ocf_score = 5
+                fundamentals_score += ocf_score
+
+                # Debt/Equity trend (5 pts) - lower D/E is better
+                de_trend_score = max(0, min(5, (0.5 - debt_to_equity) / 0.5 * 5)) if debt_to_equity else 0
+                fundamentals_score += de_trend_score
+
+                # MOMENTUM CATEGORY (15 pts)
+                # Price vs 50DMA (8 pts) - price above 50DMA shows positive momentum
+                if dma_50 and current_price:
+                    price_vs_50dma_score = max(0, min(8, (current_price - dma_50) / dma_50 * 8))
+                else:
+                    price_vs_50dma_score = 4
+                momentum_score += price_vs_50dma_score
+
+                # Dark horse score (7 pts) - based on momentum and trend
+                dh_score = max(0, min(7, (price_vs_50dma_score / 8) * 7))
+                momentum_score += dh_score
+
+                # RISK PENALTY (up to -10 pts)
+                # High D/E penalty
+                if debt_to_equity and debt_to_equity > 0.5:
+                    risk_penalty -= 3
+                # High PE penalty
+                if pe and pe > 25:
+                    risk_penalty -= 3
+                # Low ROCE penalty
+                if roce and roce < 10:
+                    risk_penalty -= 4
+                risk_penalty = max(-10, risk_penalty)  # Cap at -10
+
+                # Total score
+                total_score = value_score + fundamentals_score + momentum_score + risk_penalty
 
                 # Entry/Exit point evaluation
                 entry_point = None
@@ -3391,7 +3412,11 @@ with tab_scanner:
                     "symbol": sym,
                     "name": data.get("name", sym.removesuffix(NSE_SUFFIX)),
                     "sector": data.get("sector", "Unknown"),
-                    "score": round(score, 1),
+                    "score": round(total_score, 1),
+                    "value_score": round(value_score, 1),
+                    "fundamentals_score": round(fundamentals_score, 1),
+                    "momentum_score": round(momentum_score, 1),
+                    "risk_penalty": round(risk_penalty, 1),
                     "ocf_score": round(ocf_score, 1),
                     "current_price": current_price,
                     "pe": pe,
@@ -3502,6 +3527,10 @@ with tab_scanner:
                 "Name": r["name"][:30],
                 "Sector": r["sector"][:20],
                 "Score": f"{score_color} {r['score']}",
+                "Value": f"{r.get('value_score', 0):.1f}",
+                "Fund": f"{r.get('fundamentals_score', 0):.1f}",
+                "Mom": f"{r.get('momentum_score', 0):.1f}",
+                "Risk": f"{r.get('risk_penalty', 0):.1f}",
                 "Signal": f"{signal_emoji} {r.get('entry_signal', '-')}",
                 "Price": format_inr(r["current_price"]),
                 "50 DMA": format_inr(r.get("dma_50")) if r.get("dma_50") else "-",
@@ -3515,7 +3544,7 @@ with tab_scanner:
                 "Upside %": f"{upside:.1f}%" if upside else "-",
                 "50W Forecast": format_inr(r.get("forecast_50w")) if r.get("forecast_50w") else "-",
                 "Reasoning": r["reasoning"],
-                "Risk": r["risk_flag"] or "-",
+                "Risk Flag": r["risk_flag"] or "-",
             })
 
         df = pd.DataFrame(display_data)
@@ -3535,7 +3564,36 @@ with tab_scanner:
                     st.markdown(f"**Symbol:** {stock_data['symbol']}")
                     st.markdown(f"**Sector:** {stock_data['sector']}")
                     st.markdown(f"**Dark Horse Score:** {stock_data['score']}/100")
-                    st.markdown(f"**OCF Score:** {stock_data['ocf_score']}/25")
+                    
+                    # Category scores with color-coded bars
+                    st.markdown("#### Category Scores")
+                    
+                    # Value score (35 pts max)
+                    value_score = stock_data.get('value_score', 0)
+                    value_pct = (value_score / 35) * 100
+                    value_color = "green" if value_score >= 28 else "orange" if value_score >= 21 else "red"
+                    st.markdown(f"**Value ({value_score}/35)**")
+                    st.markdown(f'<div style="background: #e0e0e0; border-radius: 5px; width: 100%; height: 20px;"><div style="background: {value_color}; border-radius: 5px; width: {value_pct}%; height: 100%;"></div></div>', unsafe_allow_html=True)
+                    
+                    # Fundamentals score (40 pts max)
+                    fund_score = stock_data.get('fundamentals_score', 0)
+                    fund_pct = (fund_score / 40) * 100
+                    fund_color = "green" if fund_score >= 32 else "orange" if fund_score >= 24 else "red"
+                    st.markdown(f"**Fundamentals ({fund_score}/40)**")
+                    st.markdown(f'<div style="background: #e0e0e0; border-radius: 5px; width: 100%; height: 20px;"><div style="background: {fund_color}; border-radius: 5px; width: {fund_pct}%; height: 100%;"></div></div>', unsafe_allow_html=True)
+                    
+                    # Momentum score (15 pts max)
+                    mom_score = stock_data.get('momentum_score', 0)
+                    mom_pct = (mom_score / 15) * 100
+                    mom_color = "green" if mom_score >= 12 else "orange" if mom_score >= 9 else "red"
+                    st.markdown(f"**Momentum ({mom_score}/15)**")
+                    st.markdown(f'<div style="background: #e0e0e0; border-radius: 5px; width: 100%; height: 20px;"><div style="background: {mom_color}; border-radius: 5px; width: {mom_pct}%; height: 100%;"></div></div>', unsafe_allow_html=True)
+                    
+                    # Risk penalty (up to -10 pts)
+                    risk_penalty = stock_data.get('risk_penalty', 0)
+                    risk_color = "green" if risk_penalty >= -3 else "orange" if risk_penalty >= -6 else "red"
+                    st.markdown(f"**Risk Penalty ({risk_penalty})**")
+                    st.markdown(f'<div style="background: #e0e0e0; border-radius: 5px; width: 100%; height: 20px;"><div style="background: {risk_color}; border-radius: 5px; width: {max(0, 100 + risk_penalty * 10)}%; height: 100%;"></div></div>', unsafe_allow_html=True)
 
                 with col2:
                     st.markdown("#### Key Ratios")

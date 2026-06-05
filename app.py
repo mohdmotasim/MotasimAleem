@@ -1402,39 +1402,30 @@ def render_sector_stocks() -> None:
     sector_data_dict = fetch_sector_stocks_data()
     
     for sector, stocks in sector_data_dict.items():
-        # Compact sector header
-        st.sidebar.markdown(f"<small style='font-size: 0.85rem; font-weight: bold;'>{sector}</small>", unsafe_allow_html=True)
+        # Sector header
+        st.sidebar.markdown(f"**{sector}**")
         
-        # Display all stocks in a single compact block
-        stock_lines = []
+        # Display each stock with metrics in a compact format
         for stock in stocks:
             pe_str = f"PE:{stock['pe']:.1f}" if stock['pe'] else "PE:-"
             change_str = f"{stock['change_1w']:+.1f}%" if stock['change_1w'] is not None else "-"
-            change_color = "green" if stock['change_1w'] and stock['change_1w'] >= 0 else "red"
             
-            # Create a single line with all details (no HTML button)
-            stock_html = f"""
-            <div style='display: flex; align-items: center; margin: 2px 0;'>
-                <small style='font-size: 0.75rem; flex: 1;'>{stock['name']}</small>
-                <small style='font-size: 0.75rem; flex: 0.6;'>₹{stock['price']:.0f}</small>
-                <small style='font-size: 0.75rem; flex: 0.5;'>{pe_str}</small>
-                <small style='font-size: 0.75rem; color: {change_color}; flex: 0.5;'>{change_str}</small>
-            </div>
-            """
-            stock_lines.append(stock_html)
-        
-        # Display all stocks as a single block
-        st.sidebar.markdown(f"<div style='margin: 4px 0;'>{''.join(stock_lines)}</div>", unsafe_allow_html=True)
-        
-        # Add open buttons in a compact row
-        btn_cols = st.sidebar.columns(len(stocks))
-        for idx, stock in enumerate(stocks):
-            with btn_cols[idx]:
+            # Single line with all details using columns
+            cols = st.sidebar.columns([2, 1, 1, 1, 0.5])
+            with cols[0]:
+                st.sidebar.write(f"{stock['name']}")
+            with cols[1]:
+                st.sidebar.write(f"₹{stock['price']:.0f}")
+            with cols[2]:
+                st.sidebar.write(pe_str)
+            with cols[3]:
+                st.sidebar.write(change_str)
+            with cols[4]:
                 if st.sidebar.button("📊", key=f"sector_open_{stock['symbol']}", help=f"Open {stock['name']}", use_container_width=True):
                     st.session_state["selected_symbol"] = stock['symbol']
                     st.rerun()
         
-        st.sidebar.markdown("<hr style='margin: 6px 0;'>", unsafe_allow_html=True)
+        st.sidebar.markdown("---")
 
 def render_dark_horse_badge(data: dict) -> None:
     dh = data.get("dark_horse")

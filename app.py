@@ -1405,22 +1405,19 @@ def render_sector_stocks() -> None:
         # Sector header
         st.sidebar.markdown(f"**{sector}**")
         
-        # Display each stock with metrics in a compact format
+        # Display each stock with metrics in pipe-separated format
         for stock in stocks:
-            pe_str = f"PE:{stock['pe']:.1f}" if stock['pe'] else "PE:-"
+            pe_str = f"PE {stock['pe']:.1f}" if stock['pe'] else "PE -"
             change_str = f"{stock['change_1w']:+.1f}%" if stock['change_1w'] is not None else "-"
             
-            # Single line with all details using columns
-            cols = st.sidebar.columns([2, 1, 1, 1, 0.5])
-            with cols[0]:
-                st.sidebar.caption(f"{stock['name']}")
-            with cols[1]:
-                st.sidebar.caption(f"₹{stock['price']:.0f}")
-            with cols[2]:
-                st.sidebar.caption(pe_str)
-            with cols[3]:
-                st.sidebar.caption(change_str)
-            with cols[4]:
+            # Single line with pipe-separated format
+            stock_line = f"{stock['name']} || ₹{stock['price']:.0f} || {pe_str} || {change_str}"
+            
+            # Display line with button
+            col_text, col_btn = st.sidebar.columns([4, 1])
+            with col_text:
+                st.sidebar.caption(stock_line)
+            with col_btn:
                 if st.sidebar.button("📊", key=f"sector_open_{stock['symbol']}", help=f"Open {stock['name']}", use_container_width=True):
                     st.session_state["selected_symbol"] = stock['symbol']
                     st.rerun()

@@ -2860,11 +2860,7 @@ with st.container(border=True):
     with top_mid:
         search_clicked = st.button("Search", use_container_width=True)
     with top_right:
-        add_clicked = st.button("+ Add to watchlist", use_container_width=True)
-
-refresh_col, _ = st.columns([1, 5])
-with refresh_col:
-    refresh_clicked = st.button("🔄 Refresh data", use_container_width=True)
+        refresh_clicked = st.button("🔄 Refresh data", use_container_width=True)
 
 if refresh_clicked:
     st.cache_data.clear()
@@ -2879,23 +2875,6 @@ if search_clicked:
         if not valid:
             nse_not_found_error(query)
         else:
-            st.session_state["selected_symbol"] = ticker
-            st.rerun()
-
-if add_clicked:
-    query = search_query.strip()
-    if not query:
-        st.warning("Enter a stock to add to the watchlist.")
-    else:
-        valid, ticker, display_name = search_nse_stock(query)
-        if not valid:
-            st.error(f"Could not find '{query}' on NSE. Try the full ticker (e.g., RELIANCE, TCS, HDFCBANK).")
-        else:
-            if ticker in get_watchlist():
-                st.info(f"{ticker} is already in your watchlist.")
-            else:
-                add_to_conviction(ticker, "1")
-                st.success(f"Added {ticker} ({display_name}) to watchlist.")
             st.session_state["selected_symbol"] = ticker
             st.rerun()
 

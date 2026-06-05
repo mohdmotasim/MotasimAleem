@@ -1333,99 +1333,95 @@ def render_conviction_tier_board(tiers: dict[str, list[str]]) -> None:
                     st.rerun()
 
 
-def render_conviction_watchlist() -> None:
-    init_conviction_state()
-    tiers = get_conviction_tiers()
-    symbols = all_conviction_symbols()
+# Sector stock lists for top stocks display
+SECTOR_STOCKS = {
+    "💻 IT & AI": [
+        "TCS.NS", "INFY.NS", "HCLTECH.NS", "WIPRO.NS", "LTIM.NS", "TECHM.NS", "MPHASIS.NS", "COFORGE.NS"
+    ],
+    "⚡ Renewables": [
+        "TATAPOWER.NS", "ADANIGREEN.NS", "RENUKA.NS", "SJVN.NS", "NHPC.NS", "NTPC.NS", "POWERGRID.NS"
+    ],
+    "💊 Pharma": [
+        "SUNPHARMA.NS", "DRREDDY.NS", "CIPLA.NS", "AUROPHARMA.NS", "DIVISLAB.NS", "LUPIN.NS", "TORNTPHARM.NS"
+    ],
+    "🛡️ Defence": [
+        "HAL.NS", "BEL.NS", "MIDHANI.NS", "BHEL.NS", "BEML.NS", "Mazagon.NS", "GRSE.NS"
+    ],
+    "🏦 BFSI": [
+        "HDFCBANK.NS", "ICICIBANK.NS", "SBIN.NS", "KOTAKBANK.NS", "AXISBANK.NS", "BAJFINANCE.NS", "CHOLAFIN.NS"
+    ]
+}
 
-    if not symbols:
-        st.sidebar.caption("Your watchlist is empty. Search and add stocks above.")
-        return
 
-    st.sidebar.caption("Move stocks with tier dropdowns · **Open** loads the chart")
-    t1, t2, t3 = (
-        tier_allocation_total("1"),
-        tier_allocation_total("2"),
-        tier_allocation_total("3"),
-    )
-    n1, n2, n3 = len(tiers["1"]), len(tiers["2"]), len(tiers["3"])
-    m1, m2, m3 = st.sidebar.columns(3)
-    m1.metric("Tier 1", n1, help=f"Watching · {t1:.1f}% allocated")
-    m2.metric("Tier 2", n2, help=f"Starter · {t2:.1f}% allocated (cap 2% each)")
-    m3.metric("Tier 3", n3, help=f"High conviction · {t3:.1f}% allocated (cap 8% each)")
-    st.sidebar.caption(
-        f"**{n1 + n2 + n3}** stocks · **{t1 + t2 + t3:.1f}%** combined portfolio allocation"
-    )
-
-    render_conviction_tier_board(tiers)
-
-    tier3_symbols = get_conviction_tiers()["3"]
-    if tier3_symbols:
-        st.sidebar.markdown("**Tier 3 — Thesis & sizing**")
-    for sym in tier3_symbols:
-        label = sym.removesuffix(NSE_SUFFIX)
-        meta = get_conviction_meta(sym)
-        with st.sidebar.container():
-            st.markdown(
-                f'<div class="conviction-stock-block tier-3-block">'
-                f"<strong>{label}</strong> · High conviction</div>",
-                unsafe_allow_html=True,
-            )
-            rm_col, _ = st.columns([1, 5])
-            if rm_col.button("Remove", key=f"conv_rm_{sym}", use_container_width=True):
-                remove_from_conviction(sym)
-                if st.session_state.get("selected_symbol") == sym:
-                    remaining = all_conviction_symbols()
-                    st.session_state["selected_symbol"] = remaining[0] if remaining else None
-                st.rerun()
-            alloc = st.number_input(
-                "Allocation %",
-                min_value=0.0,
-                max_value=8.0,
-                value=min(float(meta.get("allocation_pct", 5.0)), 8.0),
-                step=0.25,
-                key=f"conv_alloc_{sym}",
-            )
-            meta["allocation_pct"] = float(alloc)
-            thesis = st.text_area(
-                "Investment thesis",
-                value=meta.get("thesis", ""),
-                height=100,
-                key=f"conv_thesis_{sym}",
-                placeholder="Why this is a core holding; catalysts, risks, exit plan…",
-            )
-            meta["thesis"] = thesis
-            _save_conviction_to_disk()
-
-    tier2_symbols = get_conviction_tiers()["2"]
-    if tier2_symbols:
-        st.sidebar.markdown("**Tier 2 — Starter sizing**")
-    for sym in tier2_symbols:
-        label = sym.removesuffix(NSE_SUFFIX)
-        meta = get_conviction_meta(sym)
-        with st.sidebar.container():
-            st.markdown(
-                f'<div class="conviction-stock-block tier-2-block">'
-                f"<strong>{label}</strong> · Starter</div>",
-                unsafe_allow_html=True,
-            )
-            rm_col, _ = st.columns([1, 5])
-            if rm_col.button("Remove", key=f"conv_rm_t2_{sym}", use_container_width=True):
-                remove_from_conviction(sym)
-                if st.session_state.get("selected_symbol") == sym:
-                    remaining = all_conviction_symbols()
-                    st.session_state["selected_symbol"] = remaining[0] if remaining else None
-                st.rerun()
-            alloc = st.number_input(
-                "Allocation %",
-                min_value=0.0,
-                max_value=2.0,
-                value=min(float(meta.get("allocation_pct", 1.5)), 2.0),
-                step=0.25,
-                key=f"conv_alloc_t2_{sym}",
-            )
-            meta["allocation_pct"] = float(alloc)
-            _save_conviction_to_disk()
+def render_sector_stocks() -> None:
+    """Display top 4 stocks from each sector with key metrics."""
+    for sector, stocks in SECTOR_STOCKS.items():
+        st.sidebar.markdown(f"**{sector}**")
+        
+        sector_data = []
+        for sym in stocks[:4]:  # Get top 4 stocks
+            try:
+                ticker = yf.Ticker(sym)
+                info = ticker.info or {}
+                current_price = _safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
+                pe = _safe_float(info.get("trailingPE") or info.get("forwardPE"))
+                market_cap = _safe_float(info.get("marketCap"))
+                
+                # Calculate 1-week change
+                change_1w = None
+                try:
+                    hist = ticker.history(period="1w")
+                    if len(hist) >= 2:
+                        start_price = hist['Close'].iloc[0]
+                        end_price = hist['Close'].iloc[-1]
+                        change_1w = ((end_price - start_price) / start_price) * 100
+                except:
+                    pass
+                
+                if current_price:
+                    sector_data.append({
+                        "symbol": sym,
+                        "name": sym.removesuffix(NSE_SUFFIX),
+                        "price": current_price,
+                        "pe": pe,
+                        "market_cap": market_cap,
+                        "change_1w": change_1w
+                    })
+            except Exception:
+                pass
+        
+        # Sort by market cap (descending) and display top 4
+        sector_data.sort(key=lambda x: x["market_cap"] or 0, reverse=True)
+        
+        for stock in sector_data[:4]:
+            with st.sidebar.container():
+                # Display stock name and price
+                name_col, price_col = st.sidebar.columns([2, 1])
+                with name_col:
+                    st.sidebar.markdown(f"**{stock['name']}**")
+                with price_col:
+                    st.sidebar.markdown(f"₹{stock['price']:.0f}")
+                
+                # Display metrics
+                metrics_col = st.sidebar.columns(2)
+                with metrics_col[0]:
+                    if stock['pe']:
+                        st.sidebar.caption(f"PE: {stock['pe']:.1f}")
+                    else:
+                        st.sidebar.caption("PE: N/A")
+                with metrics_col[1]:
+                    if stock['change_1w'] is not None:
+                        change_color = "🟢" if stock['change_1w'] >= 0 else "🔴"
+                        st.sidebar.caption(f"{change_color} {stock['change_1w']:+.1f}%")
+                    else:
+                        st.sidebar.caption("1W: N/A")
+                
+                # Add open button
+                if st.sidebar.button("Open", key=f"sector_open_{stock['symbol']}", use_container_width=True):
+                    st.session_state["selected_symbol"] = stock['symbol']
+                    st.rerun()
+                
+                st.sidebar.markdown("---")
 
 def render_dark_horse_badge(data: dict) -> None:
     dh = data.get("dark_horse")
@@ -2906,8 +2902,8 @@ if add_clicked:
             st.session_state["selected_symbol"] = ticker
             st.rerun()
 
-st.sidebar.markdown("### Conviction watchlist")
-render_conviction_watchlist()
+st.sidebar.markdown("### Top Sector Stocks")
+render_sector_stocks()
 
 st.sidebar.markdown("---")
 compare_on = st.sidebar.toggle("Compare", key="compare_enabled")

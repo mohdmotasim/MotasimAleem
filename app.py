@@ -3417,8 +3417,15 @@ with tab_scanner:
         progress_bar.empty()
         status_text.empty()
 
-        # Sort by score
-        results.sort(key=lambda x: x["score"], reverse=True)
+        # Calculate upside potential and sort by it
+        for r in results:
+            if r.get("entry_point") and r.get("exit_point"):
+                r["upside_potential"] = ((r["exit_point"] - r["entry_point"]) / r["entry_point"]) * 100
+            else:
+                r["upside_potential"] = 0
+        
+        # Sort by upside potential in descending order
+        results.sort(key=lambda x: x["upside_potential"], reverse=True)
 
         # Filter by min_score
         filtered_results = [r for r in results if r["score"] >= min_score]
@@ -3460,7 +3467,7 @@ with tab_scanner:
         with filter_col1:
             sector_filter = st.selectbox("Filter by Sector", ["All"] + list(set(r["sector"] for r in results)))
         with filter_col2:
-            sort_by = st.selectbox("Sort by", ["Score", "OCF Score", "PE", "ROE", "Price"])
+            sort_by = st.selectbox("Sort by", ["Upside Potential", "Score", "OCF Score", "PE", "ROE", "Price"])
         with filter_col3:
             sort_order = st.selectbox("Sort Order", ["Descending", "Ascending"])
 
@@ -3475,6 +3482,8 @@ with tab_scanner:
             filtered_results.sort(key=lambda x: x["score"], reverse=reverse)
         elif sort_by == "OCF Score":
             filtered_results.sort(key=lambda x: x["ocf_score"], reverse=reverse)
+        elif sort_by == "Upside Potential":
+            filtered_results.sort(key=lambda x: x.get("upside_potential", 0), reverse=reverse)
         elif sort_by == "PE":
             filtered_results.sort(key=lambda x: x["pe"], reverse=not reverse)
         elif sort_by == "ROE":
@@ -3486,6 +3495,7 @@ with tab_scanner:
         for idx, r in enumerate(filtered_results, 1):
             score_color = "🟢" if r["score"] >= 80 else "🟡" if r["score"] >= 60 else "🔴"
             signal_emoji = "🟢" if r.get("entry_signal") == "BUY" else "🟡" if r.get("entry_signal") == "HOLD" else "🔴"
+            upside = r.get("upside_potential", 0)
             display_data.append({
                 "Rank": idx,
                 "Symbol": r["symbol"],
@@ -3502,6 +3512,7 @@ with tab_scanner:
                 "D/E": f"{r['debt_to_equity']:.2f}",
                 "Entry": format_inr(r.get("entry_point")) if r.get("entry_point") else "-",
                 "Exit": format_inr(r.get("exit_point")) if r.get("exit_point") else "-",
+                "Upside %": f"{upside:.1f}%" if upside else "-",
                 "50W Forecast": format_inr(r.get("forecast_50w")) if r.get("forecast_50w") else "-",
                 "Reasoning": r["reasoning"],
                 "Risk": r["risk_flag"] or "-",

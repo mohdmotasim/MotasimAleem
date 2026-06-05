@@ -3234,10 +3234,10 @@ with tab_scanner:
                 operating_cash_flow = _safe_float(info.get("operatingCashflow"))
                 if operating_cash_flow and market_cap:
                     ocf_ratio = (operating_cash_flow / market_cap) * 100
-                    ocf_score = max(0, min(10, (ocf_ratio - 5) / 15 * 10))
+                    ocf_calc_score = max(0, min(10, (ocf_ratio - 5) / 15 * 10))
                 else:
-                    ocf_score = 5
-                fundamentals_score += ocf_score
+                    ocf_calc_score = 5
+                fundamentals_score += ocf_calc_score
 
                 # Debt/Equity trend (5 pts) - lower D/E is better
                 de_trend_score = max(0, min(5, (0.5 - debt_to_equity) / 0.5 * 5)) if debt_to_equity else 0

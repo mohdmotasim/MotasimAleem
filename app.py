@@ -1410,17 +1410,13 @@ def render_sector_stocks() -> None:
             pe_str = f"PE {stock['pe']:.1f}" if stock['pe'] else "PE -"
             change_str = f"{stock['change_1w']:+.1f}%" if stock['change_1w'] is not None else "-"
             
-            # Single line with pipe-separated format
+            # Single line with pipe-separated format including button
             stock_line = f"{stock['name']} || ₹{stock['price']:.0f} || {pe_str} || {change_str}"
             
-            # Display line with button
-            col_text, col_btn = st.sidebar.columns([4, 1])
-            with col_text:
-                st.sidebar.caption(stock_line)
-            with col_btn:
-                if st.sidebar.button("📊", key=f"sector_open_{stock['symbol']}", help=f"Open {stock['name']}", use_container_width=True):
-                    st.session_state["selected_symbol"] = stock['symbol']
-                    st.rerun()
+            # Display line with inline button
+            if st.sidebar.button(f"{stock_line} 📊", key=f"sector_open_{stock['symbol']}", help=f"Open {stock['name']}", use_container_width=True):
+                st.session_state["selected_symbol"] = stock['symbol']
+                st.rerun()
         
         st.sidebar.markdown("---")
 

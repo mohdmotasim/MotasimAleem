@@ -1412,14 +1412,13 @@ def render_sector_stocks() -> None:
             change_str = f"{stock['change_1w']:+.1f}%" if stock['change_1w'] is not None else "-"
             change_color = "green" if stock['change_1w'] and stock['change_1w'] >= 0 else "red"
             
-            # Create a single line with all details
+            # Create a single line with all details (no HTML button)
             stock_html = f"""
             <div style='display: flex; align-items: center; margin: 2px 0;'>
                 <small style='font-size: 0.75rem; flex: 1;'>{stock['name']}</small>
                 <small style='font-size: 0.75rem; flex: 0.6;'>₹{stock['price']:.0f}</small>
                 <small style='font-size: 0.75rem; flex: 0.5;'>{pe_str}</small>
                 <small style='font-size: 0.75rem; color: {change_color}; flex: 0.5;'>{change_str}</small>
-                <button onclick="window.location.href='?symbol={stock['symbol']}'" style='font-size: 0.7rem; padding: 1px 4px; margin-left: 4px;'>📊</button>
             </div>
             """
             stock_lines.append(stock_html)

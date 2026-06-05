@@ -3188,83 +3188,165 @@ with tab_scanner:
                     skipped += 1
                     continue
 
-                # Calculate dark horse score with new weighting system
+                # Calculate dark horse score with new exact weighting system
                 value_score = 0
                 fundamentals_score = 0
                 momentum_score = 0
                 risk_penalty = 0
+                risk_flags = []
 
-                # VALUE CATEGORY (35 pts)
-                # PE vs sector (12 pts) - lower PE than sector average is better
-                sector_avg_pe = 20  # Simplified sector average (could be made sector-specific)
-                pe_vs_sector_score = max(0, min(12, (sector_avg_pe - pe) / 15 * 12)) if pe else 0
+                # CATEGORY 1 — VALUE (35 pts total)
+                # PE ratio vs sector median → 12 pts. Score = 12 if PE is 20%+ below sector median, scale down to 0 if at or above median
+                sector_median_pe = 20  # Simplified sector median (could be made sector-specific)
+                if pe:
+                    pe_discount_pct = ((sector_median_pe - pe) / sector_median_pe) * 100
+                    if pe_discount_pct >= 20:
+                        pe_vs_sector_score = 12
+                    elif pe_discount_pct <= 0:
+                        pe_vs_sector_score = 0
+                    else:
+                        pe_vs_sector_score = (pe_discount_pct / 20) * 12
+                    pe_vs_sector_score = max(0, min(12, pe_vs_sector_score))
+                else:
+                    pe_vs_sector_score = 0
                 value_score += pe_vs_sector_score
 
-                # PB score (8 pts) - lower PB is better
-                pb_score = max(0, min(8, (3 - pb) / 3 * 8)) if pb else 0
+                # PB ratio → 8 pts. Score = 8 if PB < 2, scale to 0 at PB > 5
+                if pb:
+                    if pb < 2:
+                        pb_score = 8
+                    elif pb > 5:
+                        pb_score = 0
+                    else:
+                        pb_score = 8 * ((5 - pb) / 3)
+                    pb_score = max(0, min(8, pb_score))
+                else:
+                    pb_score = 0
                 value_score += pb_score
 
-                # Price vs 200DMA (8 pts) - price below 200DMA is better for value
+                # Price vs 200 DMA → 8 pts. Score = 8 if price is 10%+ below 200DMA, 0 if above
                 if dma_200 and current_price:
-                    price_vs_200dma_score = max(0, min(8, (dma_200 - current_price) / dma_200 * 8))
+                    price_vs_200dma_pct = ((dma_200 - current_price) / dma_200) * 100
+                    if price_vs_200dma_pct >= 10:
+                        price_vs_200dma_score = 8
+                    elif price_vs_200dma_pct <= 0:
+                        price_vs_200dma_score = 0
+                    else:
+                        price_vs_200dma_score = (price_vs_200dma_pct / 10) * 8
+                    price_vs_200dma_score = max(0, min(8, price_vs_200dma_score))
                 else:
-                    price_vs_200dma_score = 4
+                    price_vs_200dma_score = 0
                 value_score += price_vs_200dma_score
 
-                # Price vs 52w high (7 pts) - price closer to 52w low is better
-                week_52_low = data.get("week_52_low")
+                # Price vs 52-week high → 7 pts. Score = 7 if price is 30%+ below 52w high, scale to 0 if within 5%
                 week_52_high = data.get("week_52_high")
-                if week_52_low and week_52_high and current_price:
-                    position_52w = (current_price - week_52_low) / (week_52_high - week_52_low) * 100
-                    price_vs_52w_high_score = max(0, min(7, (100 - position_52w) / 100 * 7))
+                if week_52_high and current_price:
+                    price_vs_52w_high_pct = ((week_52_high - current_price) / week_52_high) * 100
+                    if price_vs_52w_high_pct >= 30:
+                        price_vs_52w_high_score = 7
+                    elif price_vs_52w_high_pct <= 5:
+                        price_vs_52w_high_score = 0
+                    else:
+                        price_vs_52w_high_score = ((price_vs_52w_high_pct - 5) / 25) * 7
+                    price_vs_52w_high_score = max(0, min(7, price_vs_52w_high_score))
                 else:
-                    price_vs_52w_high_score = 3.5
+                    price_vs_52w_high_score = 0
                 value_score += price_vs_52w_high_score
 
-                # FUNDAMENTALS CATEGORY (40 pts)
-                # ROE score (15 pts) - higher ROE is better
-                roe_score = max(0, min(15, (roe - 10) / 20 * 15)) if roe else 0
+                # CATEGORY 2 — FUNDAMENTALS (40 pts total)
+                # ROE → 15 pts. Score = 15 if ROE > 25%, 10 if ROE 15–25%, 5 if ROE 10–15%, 0 if below 10%
+                if roe:
+                    if roe > 25:
+                        roe_score = 15
+                    elif roe >= 15:
+                        roe_score = 10
+                    elif roe >= 10:
+                        roe_score = 5
+                    else:
+                        roe_score = 0
+                else:
+                    roe_score = 0
                 fundamentals_score += roe_score
 
-                # ROCE score (10 pts) - higher ROCE is better
-                roce_score = max(0, min(10, (roce - 10) / 20 * 10)) if roce else 0
+                # ROCE → 10 pts. Score = 10 if ROCE > 20%, 7 if 15–20%, 4 if 10–15%, 0 if below 10%
+                if roce:
+                    if roce > 20:
+                        roce_score = 10
+                    elif roce >= 15:
+                        roce_score = 7
+                    elif roce >= 10:
+                        roce_score = 4
+                    else:
+                        roce_score = 0
+                else:
+                    roce_score = 0
                 fundamentals_score += roce_score
 
-                # OCF score (10 pts) - calculate operating cash flow score
+                # OCF Score → 10 pts. Pass through directly if already scored out of 25 — normalize to 10 pts
+                # Use the existing ocf_score calculation (out of 25) and normalize to 10
                 operating_cash_flow = _safe_float(info.get("operatingCashflow"))
-                if operating_cash_flow and market_cap:
-                    ocf_ratio = (operating_cash_flow / market_cap) * 100
-                    ocf_calc_score = max(0, min(10, (ocf_ratio - 5) / 15 * 10))
+                net_income = _safe_float(info.get("netIncomeToCommon"))
+                revenue = _safe_float(info.get("totalRevenue"))
+                ocf_raw_score = 0
+                if ocf and net_income:
+                    ocf_vs_profit = 10 if ocf > net_income else 5
+                    ocf_raw_score += ocf_vs_profit
+                    if revenue:
+                        ocf_ratio = ocf / revenue
+                        ocf_ratio_score = max(0, min(5, ocf_ratio * 100))
+                        ocf_raw_score += ocf_ratio_score
+                    ocf_positive = 10 if ocf > 0 else 0
+                    ocf_raw_score += ocf_positive
+                # Normalize from 25 to 10
+                ocf_normalized_score = (ocf_raw_score / 25) * 10
+                ocf_normalized_score = max(0, min(10, ocf_normalized_score))
+                fundamentals_score += ocf_normalized_score
+
+                # Debt/Equity → 5 pts. Score = 5 if D/E < 0.5, 3 if 0.5–1.0, 1 if 1.0–2.0, 0 if above 2.0
+                if debt_to_equity:
+                    if debt_to_equity < 0.5:
+                        de_score = 5
+                    elif debt_to_equity <= 1.0:
+                        de_score = 3
+                    elif debt_to_equity <= 2.0:
+                        de_score = 1
+                    else:
+                        de_score = 0
                 else:
-                    ocf_calc_score = 5
-                fundamentals_score += ocf_calc_score
+                    de_score = 0
+                fundamentals_score += de_score
 
-                # Debt/Equity trend (5 pts) - lower D/E is better
-                de_trend_score = max(0, min(5, (0.5 - debt_to_equity) / 0.5 * 5)) if debt_to_equity else 0
-                fundamentals_score += de_trend_score
-
-                # MOMENTUM CATEGORY (15 pts)
-                # Price vs 50DMA (8 pts) - price above 50DMA shows positive momentum
+                # CATEGORY 3 — MOMENTUM (15 pts total)
+                # Price vs 50 DMA → 8 pts. Score = 8 if price is above 50 DMA (recovery signal), 0 if below
                 if dma_50 and current_price:
-                    price_vs_50dma_score = max(0, min(8, (current_price - dma_50) / dma_50 * 8))
+                    if current_price > dma_50:
+                        price_vs_50dma_score = 8
+                    else:
+                        price_vs_50dma_score = 0
                 else:
-                    price_vs_50dma_score = 4
+                    price_vs_50dma_score = 0
                 momentum_score += price_vs_50dma_score
 
-                # Dark horse score (7 pts) - based on momentum and trend
-                dh_score = max(0, min(7, (price_vs_50dma_score / 8) * 7))
-                momentum_score += dh_score
+                # Existing Dark Horse score → 7 pts. Normalize current dark horse score to 7 pts
+                # Calculate a simple dark horse score based on momentum and fundamentals
+                dh_base_score = (roe_score / 15) * 3 + (roce_score / 10) * 2 + (price_vs_50dma_score / 8) * 2
+                dh_normalized_score = (dh_base_score / 7) * 7
+                dh_normalized_score = max(0, min(7, dh_normalized_score))
+                momentum_score += dh_normalized_score
 
-                # RISK PENALTY (up to -10 pts)
-                # High D/E penalty
-                if debt_to_equity and debt_to_equity > 0.5:
+                # CATEGORY 4 — RISK PENALTY (subtract up to 10 pts)
+                # D/E > 2.0 → subtract 5 pts
+                if debt_to_equity and debt_to_equity > 2.0:
+                    risk_penalty -= 5
+                    risk_flags.append("High D/E (>2.0)")
+                # PE > 30 → subtract 3 pts
+                if pe and pe > 30:
                     risk_penalty -= 3
-                # High PE penalty
-                if pe and pe > 25:
-                    risk_penalty -= 3
-                # Low ROCE penalty
+                    risk_flags.append("High PE (>30)")
+                # ROCE < 10% → subtract 2 pts
                 if roce and roce < 10:
-                    risk_penalty -= 4
+                    risk_penalty -= 2
+                    risk_flags.append("Low ROCE (<10%)")
                 risk_penalty = max(-10, risk_penalty)  # Cap at -10
 
                 # Total score
@@ -3417,6 +3499,7 @@ with tab_scanner:
                     "fundamentals_score": round(fundamentals_score, 1),
                     "momentum_score": round(momentum_score, 1),
                     "risk_penalty": round(risk_penalty, 1),
+                    "risk_flags": risk_flags,
                     "ocf_score": round(ocf_score, 1),
                     "current_price": current_price,
                     "pe": pe,
@@ -3563,10 +3646,24 @@ with tab_scanner:
                     st.markdown(f"#### {stock_data['name']}")
                     st.markdown(f"**Symbol:** {stock_data['symbol']}")
                     st.markdown(f"**Sector:** {stock_data['sector']}")
-                    st.markdown(f"**Dark Horse Score:** {stock_data['score']}/100")
+                    
+                    # Total Score badge with color coding
+                    total_score = stock_data['score']
+                    if total_score >= 75:
+                        score_color = "🟢"
+                        score_zone = "Strong Buy zone"
+                    elif total_score >= 50:
+                        score_color = "🟡"
+                        score_zone = "Watch zone"
+                    else:
+                        score_color = "🔴"
+                        score_zone = "Avoid"
+                    
+                    st.markdown(f"### {score_color} Total Score: {total_score}/100")
+                    st.caption(f"({score_zone})")
                     
                     # Category scores with color-coded bars
-                    st.markdown("#### Category Scores")
+                    st.markdown("#### Score Breakdown")
                     
                     # Value score (35 pts max)
                     value_score = stock_data.get('value_score', 0)
@@ -3594,6 +3691,13 @@ with tab_scanner:
                     risk_color = "green" if risk_penalty >= -3 else "orange" if risk_penalty >= -6 else "red"
                     st.markdown(f"**Risk Penalty ({risk_penalty})**")
                     st.markdown(f'<div style="background: #e0e0e0; border-radius: 5px; width: 100%; height: 20px;"><div style="background: {risk_color}; border-radius: 5px; width: {max(0, 100 + risk_penalty * 10)}%; height: 100%;"></div></div>', unsafe_allow_html=True)
+                    
+                    # Risk Flags section
+                    risk_flags = stock_data.get('risk_flags', [])
+                    if risk_flags:
+                        st.markdown("#### Risk Flags")
+                        for flag in risk_flags:
+                            st.markdown(f'<span style="color: red;">⚠️ {flag}</span>', unsafe_allow_html=True)
 
                 with col2:
                     st.markdown("#### Key Ratios")

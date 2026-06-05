@@ -3300,22 +3300,22 @@ with tab_scanner:
                         # Determine entry point based on 2-week analysis
                         if current_price > dma_50:
                             # Price above 50 DMA - look for pullback to DMA or recent low
-                            entry_point = max(dma_50, recent_low)
+                            entry_point = min(dma_50, recent_low)
                             if current_price < dma_50 * 1.02 or current_price < recent_low * 1.03:
                                 entry_signal = "BUY"
                             elif recent_trend < -5:  # Recent downtrend
                                 entry_signal = "WAIT"
                         elif current_price > dma_200:
                             # Price between 50 and 200 DMA
-                            entry_point = max(dma_200, recent_low)
+                            entry_point = min(dma_200, recent_low)
                             if current_price < dma_200 * 1.02 or current_price < recent_low * 1.03:
                                 entry_signal = "BUY"
                             elif recent_trend < -10:  # Strong recent downtrend
                                 entry_signal = "WAIT"
                         else:
-                            # Price below 200 DMA - wait for reversal
-                            entry_point = dma_200
-                            entry_signal = "WAIT"
+                            # Price below 200 DMA - current price is the entry point
+                            entry_point = current_price
+                            entry_signal = "BUY"
                     else:
                         # Fallback to original logic if 2-week data unavailable
                         if current_price > dma_50:
@@ -3327,8 +3327,9 @@ with tab_scanner:
                             if current_price < dma_200 * 1.02:
                                 entry_signal = "BUY"
                         else:
-                            entry_point = dma_200
-                            entry_signal = "WAIT"
+                            # Price below 200 DMA - current price is the entry point
+                            entry_point = current_price
+                            entry_signal = "BUY"
 
                     # 50-week forecast for exit criteria
                     # Use historical volatility and trend to project 50-week target

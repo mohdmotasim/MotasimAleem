@@ -3281,25 +3281,86 @@ with tab_scanner:
                 entry_point = None
                 exit_point = None
                 entry_signal = "HOLD"
-                if dma_50 and dma_200 and current_price:
-                    # Entry point: near 50 DMA or 200 DMA support
-                    if current_price > dma_50:
-                        entry_point = dma_50
-                        if current_price < dma_50 * 1.02:  # Within 2% of 50 DMA
-                            entry_signal = "BUY"
-                    elif current_price > dma_200:
-                        entry_point = dma_200
-                        if current_price < dma_200 * 1.02:  # Within 2% of 200 DMA
-                            entry_signal = "BUY"
-                    else:
-                        entry_point = dma_200
-                        entry_signal = "WAIT"
+                forecast_50w = None
 
-                    # Exit point: 15-20% above entry or near 52-week high
-                    if entry_point:
-                        exit_point = entry_point * 1.18  # 18% target
+                # Get 2-week historical data for entry analysis
+                hist_2w = None
+                try:
+                    hist_2w = yf.Ticker(sym).history(period="2w")
+                except:
+                    pass
+
+                if dma_50 and dma_200 and current_price:
+                    # Entry point analysis using 2-week data
+                    if hist_2w is not None and len(hist_2w) > 0:
+                        recent_low = hist_2w['Low'].min()
+                        recent_high = hist_2w['High'].max()
+                        recent_trend = (current_price - hist_2w['Close'].iloc[0]) / hist_2w['Close'].iloc[0] * 100
+
+                        # Determine entry point based on 2-week analysis
+                        if current_price > dma_50:
+                            # Price above 50 DMA - look for pullback to DMA or recent low
+                            entry_point = max(dma_50, recent_low)
+                            if current_price < dma_50 * 1.02 or current_price < recent_low * 1.03:
+                                entry_signal = "BUY"
+                            elif recent_trend < -5:  # Recent downtrend
+                                entry_signal = "WAIT"
+                        elif current_price > dma_200:
+                            # Price between 50 and 200 DMA
+                            entry_point = max(dma_200, recent_low)
+                            if current_price < dma_200 * 1.02 or current_price < recent_low * 1.03:
+                                entry_signal = "BUY"
+                            elif recent_trend < -10:  # Strong recent downtrend
+                                entry_signal = "WAIT"
+                        else:
+                            # Price below 200 DMA - wait for reversal
+                            entry_point = dma_200
+                            entry_signal = "WAIT"
+                    else:
+                        # Fallback to original logic if 2-week data unavailable
+                        if current_price > dma_50:
+                            entry_point = dma_50
+                            if current_price < dma_50 * 1.02:
+                                entry_signal = "BUY"
+                        elif current_price > dma_200:
+                            entry_point = dma_200
+                            if current_price < dma_200 * 1.02:
+                                entry_signal = "BUY"
+                        else:
+                            entry_point = dma_200
+                            entry_signal = "WAIT"
+
+                    # 50-week forecast for exit criteria
+                    # Use historical volatility and trend to project 50-week target
+                    try:
+                        hist_1y = yf.Ticker(sym).history(period="1y")
+                        if len(hist_1y) > 50:
+                            # Calculate annualized return and volatility
+                            returns = hist_1y['Close'].pct_change().dropna()
+                            annual_return = (1 + returns.mean()) ** 252 - 1
+                            volatility = returns.std() * (252 ** 0.5)
+
+                            # Conservative forecast: expected return with risk adjustment
+                            expected_50w_return = annual_return * 0.5  # Conservative estimate
+                            risk_adjusted_return = expected_50w_return - (volatility * 0.3)
+
+                            # Calculate exit point based on forecast
+                            forecast_50w = current_price * (1 + risk_adjusted_return)
+
+                            # Ensure exit point is reasonable (between 10% and 50% gain)
+                            min_exit = entry_point * 1.10 if entry_point else current_price * 1.10
+                            max_exit = entry_point * 1.50 if entry_point else current_price * 1.50
+                            forecast_50w = max(min_exit, min(max_exit, forecast_50w))
+                        else:
+                            # Fallback if insufficient historical data
+                            forecast_50w = current_price * 1.25  # 25% target
+                    except:
+                        forecast_50w = current_price * 1.25  # Default 25% target
+
+                    # Final exit point: use forecast but cap at 52-week high
+                    exit_point = forecast_50w
                     if week_52_high:
-                        exit_point = min(exit_point, week_52_high * 0.95) if exit_point else week_52_high * 0.95
+                        exit_point = min(exit_point, week_52_high * 0.95)
 
                 # OCF score (25 pts) - highest weight
                 ocf = _safe_float(info.get("operatingCashflow"))
@@ -3369,6 +3430,7 @@ with tab_scanner:
                     "dma_200": dma_200,
                     "entry_point": entry_point,
                     "exit_point": exit_point,
+                    "forecast_50w": forecast_50w,
                     "entry_signal": entry_signal,
                     "reasoning": reasoning,
                     "risk_flag": risk_flag,
@@ -3467,6 +3529,7 @@ with tab_scanner:
                 "D/E": f"{r['debt_to_equity']:.2f}",
                 "Entry": format_inr(r.get("entry_point")) if r.get("entry_point") else "-",
                 "Exit": format_inr(r.get("exit_point")) if r.get("exit_point") else "-",
+                "50W Forecast": format_inr(r.get("forecast_50w")) if r.get("forecast_50w") else "-",
                 "Reasoning": r["reasoning"],
                 "Risk": r["risk_flag"] or "-",
             })
@@ -3535,11 +3598,15 @@ with tab_scanner:
                     st.markdown(f"**Current Signal:** {signal_color} {stock_data['entry_signal']}")
                 if stock_data.get('entry_point'):
                     st.markdown(f"**Suggested Entry Price:** {format_inr(stock_data['entry_point'])}")
+                    st.caption("Based on 2-week historical analysis and DMA support levels")
                 if stock_data.get('exit_point'):
                     st.markdown(f"**Target Exit Price:** {format_inr(stock_data['exit_point'])}")
+                    st.caption("Based on 50-week forecast using historical volatility and trend")
                     if stock_data.get('current_price') and stock_data.get('entry_point'):
                         potential_gain = ((stock_data['exit_point'] - stock_data['entry_point']) / stock_data['entry_point']) * 100
                         st.markdown(f"**Potential Gain:** {potential_gain:.1f}%")
+                if stock_data.get('forecast_50w'):
+                    st.markdown(f"**50-Week Forecast:** {format_inr(stock_data['forecast_50w'])}")
 
                 # Score breakdown (simple bar chart)
                 st.markdown("#### Score Breakdown")

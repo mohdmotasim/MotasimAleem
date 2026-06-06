@@ -3188,317 +3188,321 @@ with tab_scanner:
                     skipped += 1
                     continue
 
-                try:
-                    # Calculate dark horse score with new exact weighting system
-                    value_score = 0
-                    fundamentals_score = 0
-                    momentum_score = 0
-                    risk_penalty = 0
-                    risk_flags = []
+            except Exception as e:
+                skipped += 1
+                continue
 
-                    # CATEGORY 1 — VALUE (35 pts total)
-                    # PE ratio vs sector median → 12 pts. Score = 12 if PE is 20%+ below sector median, scale down to 0 if at or above median
-                    sector_median_pe = 20  # Simplified sector median (could be made sector-specific)
-                    if pe:
-                        pe_discount_pct = ((sector_median_pe - pe) / sector_median_pe) * 100
-                        if pe_discount_pct >= 20:
-                            pe_vs_sector_score = 12
-                        elif pe_discount_pct <= 0:
-                            pe_vs_sector_score = 0
-                        else:
-                            pe_vs_sector_score = (pe_discount_pct / 20) * 12
-                        pe_vs_sector_score = max(0, min(12, pe_vs_sector_score))
-                    else:
+            try:
+                # Calculate dark horse score with new exact weighting system
+                value_score = 0
+                fundamentals_score = 0
+                momentum_score = 0
+                risk_penalty = 0
+                risk_flags = []
+
+                # CATEGORY 1 — VALUE (35 pts total)
+                # PE ratio vs sector median → 12 pts. Score = 12 if PE is 20%+ below sector median, scale down to 0 if at or above median
+                sector_median_pe = 20  # Simplified sector median (could be made sector-specific)
+                if pe:
+                    pe_discount_pct = ((sector_median_pe - pe) / sector_median_pe) * 100
+                    if pe_discount_pct >= 20:
+                        pe_vs_sector_score = 12
+                    elif pe_discount_pct <= 0:
                         pe_vs_sector_score = 0
-                    value_score += pe_vs_sector_score
-
-                    # PB ratio → 8 pts. Score = 8 if PB < 2, scale to 0 at PB > 5
-                    if pb:
-                        if pb < 2:
-                            pb_score = 8
-                        elif pb > 5:
-                            pb_score = 0
-                        else:
-                            pb_score = 8 * ((5 - pb) / 3)
-                        pb_score = max(0, min(8, pb_score))
                     else:
+                        pe_vs_sector_score = (pe_discount_pct / 20) * 12
+                    pe_vs_sector_score = max(0, min(12, pe_vs_sector_score))
+                else:
+                    pe_vs_sector_score = 0
+                value_score += pe_vs_sector_score
+
+                # PB ratio → 8 pts. Score = 8 if PB < 2, scale to 0 at PB > 5
+                if pb:
+                    if pb < 2:
+                        pb_score = 8
+                    elif pb > 5:
                         pb_score = 0
-                    value_score += pb_score
-
-                    # Price vs 200 DMA → 8 pts. Score = 8 if price is 10%+ below 200DMA, 0 if above
-                    if dma_200 and current_price:
-                        price_vs_200dma_pct = ((dma_200 - current_price) / dma_200) * 100
-                        if price_vs_200dma_pct >= 10:
-                            price_vs_200dma_score = 8
-                        elif price_vs_200dma_pct <= 0:
-                            price_vs_200dma_score = 0
-                        else:
-                            price_vs_200dma_score = (price_vs_200dma_pct / 10) * 8
-                        price_vs_200dma_score = max(0, min(8, price_vs_200dma_score))
                     else:
+                        pb_score = 8 * ((5 - pb) / 3)
+                    pb_score = max(0, min(8, pb_score))
+                else:
+                    pb_score = 0
+                value_score += pb_score
+
+                # Price vs 200 DMA → 8 pts. Score = 8 if price is 10%+ below 200DMA, 0 if above
+                if dma_200 and current_price:
+                    price_vs_200dma_pct = ((dma_200 - current_price) / dma_200) * 100
+                    if price_vs_200dma_pct >= 10:
+                        price_vs_200dma_score = 8
+                    elif price_vs_200dma_pct <= 0:
                         price_vs_200dma_score = 0
-                    value_score += price_vs_200dma_score
-
-                    # Price vs 52-week high → 7 pts. Score = 7 if price is 30%+ below 52w high, scale to 0 if within 5%
-                    week_52_high = data.get("week_52_high")
-                    if week_52_high and current_price:
-                        price_vs_52w_high_pct = ((week_52_high - current_price) / week_52_high) * 100
-                        if price_vs_52w_high_pct >= 30:
-                            price_vs_52w_high_score = 7
-                        elif price_vs_52w_high_pct <= 5:
-                            price_vs_52w_high_score = 0
-                        else:
-                            price_vs_52w_high_score = ((price_vs_52w_high_pct - 5) / 25) * 7
-                        price_vs_52w_high_score = max(0, min(7, price_vs_52w_high_score))
                     else:
-                        price_vs_52w_high_score = 0
-                    value_score += price_vs_52w_high_score
+                        price_vs_200dma_score = (price_vs_200dma_pct / 10) * 8
+                    price_vs_200dma_score = max(0, min(8, price_vs_200dma_score))
+                else:
+                    price_vs_200dma_score = 0
+                value_score += price_vs_200dma_score
 
-                    # CATEGORY 2 — FUNDAMENTALS (40 pts total)
-                    # ROE → 15 pts. Score = 15 if ROE > 25%, 10 if ROE 15–25%, 5 if ROE 10–15%, 0 if below 10%
-                    if roe:
-                        if roe > 25:
-                            roe_score = 15
-                        elif roe >= 15:
-                            roe_score = 10
-                        elif roe >= 10:
-                            roe_score = 5
-                        else:
-                            roe_score = 0
+                # Price vs 52-week high → 7 pts. Score = 7 if price is 30%+ below 52w high, scale to 0 if within 5%
+                week_52_high = data.get("week_52_high")
+                if week_52_high and current_price:
+                    price_vs_52w_high_pct = ((week_52_high - current_price) / week_52_high) * 100
+                    if price_vs_52w_high_pct >= 30:
+                        price_vs_52w_high_score = 7
+                    elif price_vs_52w_high_pct <= 5:
+                        price_vs_52w_high_score = 0
+                    else:
+                        price_vs_52w_high_score = ((price_vs_52w_high_pct - 5) / 25) * 7
+                    price_vs_52w_high_score = max(0, min(7, price_vs_52w_high_score))
+                else:
+                    price_vs_52w_high_score = 0
+                value_score += price_vs_52w_high_score
+
+                # CATEGORY 2 — FUNDAMENTALS (40 pts total)
+                # ROE → 15 pts. Score = 15 if ROE > 25%, 10 if ROE 15–25%, 5 if ROE 10–15%, 0 if below 10%
+                if roe:
+                    if roe > 25:
+                        roe_score = 15
+                    elif roe >= 15:
+                        roe_score = 10
+                    elif roe >= 10:
+                        roe_score = 5
                     else:
                         roe_score = 0
-                    fundamentals_score += roe_score
+                else:
+                    roe_score = 0
+                fundamentals_score += roe_score
 
-                    # ROCE → 10 pts. Score = 10 if ROCE > 20%, 7 if 15–20%, 4 if 10–15%, 0 if below 10%
-                    if roce:
-                        if roce > 20:
-                            roce_score = 10
-                        elif roce >= 15:
-                            roce_score = 7
-                        elif roce >= 10:
-                            roce_score = 4
-                        else:
-                            roce_score = 0
+                # ROCE → 10 pts. Score = 10 if ROCE > 20%, 7 if 15–20%, 4 if 10–15%, 0 if below 10%
+                if roce:
+                    if roce > 20:
+                        roce_score = 10
+                    elif roce >= 15:
+                        roce_score = 7
+                    elif roce >= 10:
+                        roce_score = 4
                     else:
                         roce_score = 0
-                    fundamentals_score += roce_score
+                else:
+                    roce_score = 0
+                fundamentals_score += roce_score
 
-                    # OCF Score → 10 pts. Pass through directly if already scored out of 25 — normalize to 10 pts
-                    # Use the existing ocf_score calculation (out of 25) and normalize to 10
-                    operating_cash_flow = _safe_float(info.get("operatingCashflow"))
-                    net_income = _safe_float(info.get("netIncomeToCommon"))
-                    revenue = _safe_float(info.get("totalRevenue"))
-                    ocf_raw_score = 0
-                    if operating_cash_flow and net_income:
-                        ocf_vs_profit = 10 if operating_cash_flow > net_income else 5
-                        ocf_raw_score += ocf_vs_profit
-                    if revenue:
-                        ocf_ratio = operating_cash_flow / revenue
-                        ocf_ratio_score = max(0, min(5, ocf_ratio * 100))
-                        ocf_raw_score += ocf_ratio_score
-                    ocf_positive = 10 if operating_cash_flow > 0 else 0
-                    ocf_raw_score += ocf_positive
-                    # Normalize from 25 to 10
-                    ocf_normalized_score = (ocf_raw_score / 25) * 10
-                    ocf_normalized_score = max(0, min(10, ocf_normalized_score))
-                    fundamentals_score += ocf_normalized_score
+                # OCF Score → 10 pts. Pass through directly if already scored out of 25 — normalize to 10 pts
+                # Use the existing ocf_score calculation (out of 25) and normalize to 10
+                operating_cash_flow = _safe_float(info.get("operatingCashflow"))
+                net_income = _safe_float(info.get("netIncomeToCommon"))
+                revenue = _safe_float(info.get("totalRevenue"))
+                ocf_raw_score = 0
+                if operating_cash_flow and net_income:
+                    ocf_vs_profit = 10 if operating_cash_flow > net_income else 5
+                    ocf_raw_score += ocf_vs_profit
+                if revenue:
+                    ocf_ratio = operating_cash_flow / revenue
+                    ocf_ratio_score = max(0, min(5, ocf_ratio * 100))
+                    ocf_raw_score += ocf_ratio_score
+                ocf_positive = 10 if operating_cash_flow > 0 else 0
+                ocf_raw_score += ocf_positive
+                # Normalize from 25 to 10
+                ocf_normalized_score = (ocf_raw_score / 25) * 10
+                ocf_normalized_score = max(0, min(10, ocf_normalized_score))
+                fundamentals_score += ocf_normalized_score
 
-                    # Debt/Equity → 5 pts. Score = 5 if D/E < 0.5, 3 if 0.5–1.0, 1 if 1.0–2.0, 0 if above 2.0
-                    if debt_to_equity:
-                        if debt_to_equity < 0.5:
-                            de_score = 5
-                        elif debt_to_equity <= 1.0:
-                            de_score = 3
-                        elif debt_to_equity <= 2.0:
-                            de_score = 1
-                        else:
-                            de_score = 0
+                # Debt/Equity → 5 pts. Score = 5 if D/E < 0.5, 3 if 0.5–1.0, 1 if 1.0–2.0, 0 if above 2.0
+                if debt_to_equity:
+                    if debt_to_equity < 0.5:
+                        de_score = 5
+                    elif debt_to_equity <= 1.0:
+                        de_score = 3
+                    elif debt_to_equity <= 2.0:
+                        de_score = 1
                     else:
                         de_score = 0
-                    fundamentals_score += de_score
+                else:
+                    de_score = 0
+                fundamentals_score += de_score
 
-                    # CATEGORY 3 — MOMENTUM (15 pts total)
-                    # Price vs 50 DMA → 8 pts. Score = 8 if price is above 50 DMA (recovery signal), 0 if below
-                    if dma_50 and current_price:
-                        if current_price > dma_50:
-                            price_vs_50dma_score = 8
-                        else:
-                            price_vs_50dma_score = 0
+                # CATEGORY 3 — MOMENTUM (15 pts total)
+                # Price vs 50 DMA → 8 pts. Score = 8 if price is above 50 DMA (recovery signal), 0 if below
+                if dma_50 and current_price:
+                    if current_price > dma_50:
+                        price_vs_50dma_score = 8
                     else:
                         price_vs_50dma_score = 0
-                    momentum_score += price_vs_50dma_score
+                else:
+                    price_vs_50dma_score = 0
+                momentum_score += price_vs_50dma_score
 
-                    # Existing Dark Horse score → 7 pts. Normalize current dark horse score to 7 pts
-                    # Calculate a simple dark horse score based on momentum and fundamentals
-                    dh_base_score = (roe_score / 15) * 3 + (roce_score / 10) * 2 + (price_vs_50dma_score / 8) * 2
-                    dh_normalized_score = (dh_base_score / 7) * 7
-                    dh_normalized_score = max(0, min(7, dh_normalized_score))
-                    momentum_score += dh_normalized_score
+                # Existing Dark Horse score → 7 pts. Normalize current dark horse score to 7 pts
+                # Calculate a simple dark horse score based on momentum and fundamentals
+                dh_base_score = (roe_score / 15) * 3 + (roce_score / 10) * 2 + (price_vs_50dma_score / 8) * 2
+                dh_normalized_score = (dh_base_score / 7) * 7
+                dh_normalized_score = max(0, min(7, dh_normalized_score))
+                momentum_score += dh_normalized_score
 
-                    # CATEGORY 4 — RISK PENALTY (subtract up to 10 pts)
-                    # D/E > 2.0 → subtract 5 pts
-                    if debt_to_equity and debt_to_equity > 2.0:
-                        risk_penalty -= 5
-                        risk_flags.append("High D/E (>2.0)")
-                    # PE > 30 → subtract 3 pts
-                    if pe and pe > 30:
-                        risk_penalty -= 3
-                        risk_flags.append("High PE (>30)")
-                    # ROCE < 10% → subtract 2 pts
-                    if roce and roce < 10:
-                        risk_penalty -= 2
-                        risk_flags.append("Low ROCE (<10%)")
-                    risk_penalty = max(-10, risk_penalty)  # Cap at -10
+                # CATEGORY 4 — RISK PENALTY (subtract up to 10 pts)
+                # D/E > 2.0 → subtract 5 pts
+                if debt_to_equity and debt_to_equity > 2.0:
+                    risk_penalty -= 5
+                    risk_flags.append("High D/E (>2.0)")
+                # PE > 30 → subtract 3 pts
+                if pe and pe > 30:
+                    risk_penalty -= 3
+                    risk_flags.append("High PE (>30)")
+                # ROCE < 10% → subtract 2 pts
+                if roce and roce < 10:
+                    risk_penalty -= 2
+                    risk_flags.append("Low ROCE (<10%)")
+                risk_penalty = max(-10, risk_penalty)  # Cap at -10
 
-                    # Total score
-                    total_score = value_score + fundamentals_score + momentum_score + risk_penalty
+                # Total score
+                total_score = value_score + fundamentals_score + momentum_score + risk_penalty
 
-                    # Entry/Exit point evaluation
-                    entry_point = None
-                    exit_point = None
-                    entry_signal = "HOLD"
-                    forecast_50w = None
+                # Entry/Exit point evaluation
+                entry_point = None
+                exit_point = None
+                entry_signal = "HOLD"
+                forecast_50w = None
 
-                    # Get 2-week historical data for entry analysis
-                    hist_2w = None
-                    try:
-                        hist_2w = yf.Ticker(sym).history(period="2w")
-                    except:
-                        pass
+                # Get 2-week historical data for entry analysis
+                hist_2w = None
+                try:
+                    hist_2w = yf.Ticker(sym).history(period="2w")
+                except:
+                    pass
 
-                    if dma_50 and dma_200 and current_price:
-                        # Entry point analysis using 2-week data
-                        if hist_2w is not None and len(hist_2w) > 0:
-                            recent_low = hist_2w['Low'].min()
-                            recent_high = hist_2w['High'].max()
-                            recent_trend = (current_price - hist_2w['Close'].iloc[0]) / hist_2w['Close'].iloc[0] * 100
+                if dma_50 and dma_200 and current_price:
+                    # Entry point analysis using 2-week data
+                    if hist_2w is not None and len(hist_2w) > 0:
+                        recent_low = hist_2w['Low'].min()
+                        recent_high = hist_2w['High'].max()
+                        recent_trend = (current_price - hist_2w['Close'].iloc[0]) / hist_2w['Close'].iloc[0] * 100
 
-                            # Determine entry point based on 2-week analysis
-                            if current_price > dma_50:
-                                # Price above 50 DMA - look for pullback to DMA or recent low
-                                entry_point = min(dma_50, recent_low)
-                                if current_price < dma_50 * 1.02 or current_price < recent_low * 1.03:
-                                    entry_signal = "BUY"
-                                elif recent_trend < -5:  # Recent downtrend
-                                    entry_signal = "WAIT"
-                            elif current_price > dma_200:
-                                # Price between 50 and 200 DMA
-                                entry_point = min(dma_200, recent_low)
-                                if current_price < dma_200 * 1.02 or current_price < recent_low * 1.03:
-                                    entry_signal = "BUY"
-                                elif recent_trend < -10:  # Strong recent downtrend
-                                    entry_signal = "WAIT"
-                            else:
-                                # Price below 200 DMA - current price is the entry point
-                                entry_point = current_price
+                        # Determine entry point based on 2-week analysis
+                        if current_price > dma_50:
+                            # Price above 50 DMA - look for pullback to DMA or recent low
+                            entry_point = min(dma_50, recent_low)
+                            if current_price < dma_50 * 1.02 or current_price < recent_low * 1.03:
+                                entry_signal = "BUY"
+                            elif recent_trend < -5:  # Recent downtrend
+                                entry_signal = "WAIT"
+                        elif current_price > dma_200:
+                            # Price between 50 and 200 DMA
+                            entry_point = min(dma_200, recent_low)
+                            if current_price < dma_200 * 1.02 or current_price < recent_low * 1.03:
+                                entry_signal = "BUY"
+                            elif recent_trend < -10:  # Strong recent downtrend
+                                entry_signal = "WAIT"
+                        else:
+                            # Price below 200 DMA - current price is the entry point
+                            entry_point = current_price
+                            entry_signal = "BUY"
+                    else:
+                        # Fallback to original logic if 2-week data unavailable
+                        if current_price > dma_50:
+                            entry_point = dma_50
+                            if current_price < dma_50 * 1.02:
+                                entry_signal = "BUY"
+                        elif current_price > dma_200:
+                            entry_point = dma_200
+                            if current_price < dma_200 * 1.02:
                                 entry_signal = "BUY"
                         else:
-                            # Fallback to original logic if 2-week data unavailable
-                            if current_price > dma_50:
-                                entry_point = dma_50
-                                if current_price < dma_50 * 1.02:
-                                    entry_signal = "BUY"
-                            elif current_price > dma_200:
-                                entry_point = dma_200
-                                if current_price < dma_200 * 1.02:
-                                    entry_signal = "BUY"
-                            else:
-                                # Price below 200 DMA - current price is the entry point
-                                entry_point = current_price
-                                entry_signal = "BUY"
+                            # Price below 200 DMA - current price is the entry point
+                            entry_point = current_price
+                            entry_signal = "BUY"
 
-                        # 50-week forecast for exit criteria
-                        # Use historical volatility and trend to project 50-week target
-                        try:
-                            hist_1y = yf.Ticker(sym).history(period="1y")
-                            if len(hist_1y) > 50:
-                                # Calculate annualized return and volatility
-                                returns = hist_1y['Close'].pct_change().dropna()
-                                annual_return = (1 + returns.mean()) ** 252 - 1
-                                volatility = returns.std() * (252 ** 0.5)
+                    # 50-week forecast for exit criteria
+                    # Use historical volatility and trend to project 50-week target
+                    try:
+                        hist_1y = yf.Ticker(sym).history(period="1y")
+                        if len(hist_1y) > 50:
+                            # Calculate annualized return and volatility
+                            returns = hist_1y['Close'].pct_change().dropna()
+                            annual_return = (1 + returns.mean()) ** 252 - 1
+                            volatility = returns.std() * (252 ** 0.5)
 
-                                # Conservative forecast: expected return with risk adjustment
-                                expected_50w_return = annual_return * 0.5  # Conservative estimate
-                                risk_adjusted_return = expected_50w_return - (volatility * 0.3)
+                            # Conservative forecast: expected return with risk adjustment
+                            expected_50w_return = annual_return * 0.5  # Conservative estimate
+                            risk_adjusted_return = expected_50w_return - (volatility * 0.3)
 
-                                # Calculate exit point based on forecast
-                                forecast_50w = current_price * (1 + risk_adjusted_return)
+                            # Calculate exit point based on forecast
+                            forecast_50w = current_price * (1 + risk_adjusted_return)
 
-                                # Ensure exit point is reasonable (between 10% and 50% gain)
-                                min_exit = entry_point * 1.10 if entry_point else current_price * 1.10
-                                max_exit = entry_point * 1.50 if entry_point else current_price * 1.50
-                                forecast_50w = max(min_exit, min(max_exit, forecast_50w))
-                            else:
-                                # Fallback if insufficient historical data
-                                forecast_50w = current_price * 1.25  # 25% target
-                        except:
-                            forecast_50w = current_price * 1.25  # Default 25% target
+                            # Ensure exit point is reasonable (between 10% and 50% gain)
+                            min_exit = entry_point * 1.10 if entry_point else current_price * 1.10
+                            max_exit = entry_point * 1.50 if entry_point else current_price * 1.50
+                            forecast_50w = max(min_exit, min(max_exit, forecast_50w))
+                        else:
+                            # Fallback if insufficient historical data
+                            forecast_50w = current_price * 1.25  # 25% target
+                    except:
+                        forecast_50w = current_price * 1.25  # Default 25% target
 
-                        # Final exit point: use forecast but cap at 52-week high
-                        exit_point = forecast_50w
-                        if week_52_high:
-                            exit_point = min(exit_point, week_52_high * 0.95)
+                    # Final exit point: use forecast but cap at 52-week high
+                    exit_point = forecast_50w
+                    if week_52_high:
+                        exit_point = min(exit_point, week_52_high * 0.95)
 
-                    # Generate reasoning based on new scoring
-                    reasons = []
-                    if pe and pe < 15:
-                        reasons.append(f"Low PE ({pe:.1f})")
-                    if roe and roe > 18:
-                        reasons.append(f"High ROE ({roe:.1f}%)")
-                    if roce and roce > 15:
-                        reasons.append(f"High ROCE ({roce:.1f}%)")
-                    if debt_to_equity and debt_to_equity < 0.3:
-                        reasons.append(f"Low debt ({debt_to_equity:.2f})")
-                    if value_score >= 25:
-                        reasons.append("Strong value metrics")
-                    if fundamentals_score >= 30:
-                        reasons.append("Solid fundamentals")
-                    if momentum_score >= 10:
-                        reasons.append("Positive momentum")
+                # Generate reasoning based on new scoring
+                reasons = []
+                if pe and pe < 15:
+                    reasons.append(f"Low PE ({pe:.1f})")
+                if roe and roe > 18:
+                    reasons.append(f"High ROE ({roe:.1f}%)")
+                if roce and roce > 15:
+                    reasons.append(f"High ROCE ({roce:.1f}%)")
+                if debt_to_equity and debt_to_equity < 0.3:
+                    reasons.append(f"Low debt ({debt_to_equity:.2f})")
+                if value_score >= 25:
+                    reasons.append("Strong value metrics")
+                if fundamentals_score >= 30:
+                    reasons.append("Solid fundamentals")
+                if momentum_score >= 10:
+                    reasons.append("Positive momentum")
 
-                    reasoning = ", ".join(reasons[:3]) if reasons else "Balanced fundamentals"
+                reasoning = ", ".join(reasons[:3]) if reasons else "Balanced fundamentals"
 
-                    # Risk flags
-                    risks = []
-                    if debt_to_equity and debt_to_equity > 0.4:
-                        risks.append("Moderate debt")
-                    if promoter_holding and promoter_holding < 50:
-                        risks.append("Low promoter holding")
-                    if pe and pe > 20:
-                        risks.append("High PE")
+                # Risk flags
+                risks = []
+                if debt_to_equity and debt_to_equity > 0.4:
+                    risks.append("Moderate debt")
+                if promoter_holding and promoter_holding < 50:
+                    risks.append("Low promoter holding")
+                if pe and pe > 20:
+                    risks.append("High PE")
 
-                    risk_flag = ", ".join(risks) if risks else None
+                risk_flag = ", ".join(risks) if risks else None
 
-                    results.append({
-                        "symbol": sym,
-                        "name": data.get("name", sym.removesuffix(NSE_SUFFIX)),
-                        "sector": data.get("sector", "Unknown"),
-                        "score": round(total_score, 1),
-                        "value_score": round(value_score, 1),
-                        "fundamentals_score": round(fundamentals_score, 1),
-                        "momentum_score": round(momentum_score, 1),
-                        "risk_penalty": round(risk_penalty, 1),
-                        "risk_flags": risk_flags,
-                        "ocf_score": round(ocf_normalized_score, 1),
-                        "current_price": current_price,
-                        "pe": pe,
-                        "pb": pb,
-                        "roe": roe,
-                        "roce": roce,
-                        "debt_to_equity": debt_to_equity,
-                        "dma_50": dma_50,
-                        "dma_200": dma_200,
-                        "entry_point": entry_point,
-                        "exit_point": exit_point,
-                        "forecast_50w": forecast_50w,
-                        "entry_signal": entry_signal,
-                        "reasoning": reasoning,
-                        "risk_flag": risk_flag,
-                    })
+                results.append({
+                    "symbol": sym,
+                    "name": data.get("name", sym.removesuffix(NSE_SUFFIX)),
+                    "sector": data.get("sector", "Unknown"),
+                    "score": round(total_score, 1),
+                    "value_score": round(value_score, 1),
+                    "fundamentals_score": round(fundamentals_score, 1),
+                    "momentum_score": round(momentum_score, 1),
+                    "risk_penalty": round(risk_penalty, 1),
+                    "risk_flags": risk_flags,
+                    "ocf_score": round(ocf_normalized_score, 1),
+                    "current_price": current_price,
+                    "pe": pe,
+                    "pb": pb,
+                    "roe": roe,
+                    "roce": roce,
+                    "debt_to_equity": debt_to_equity,
+                    "dma_50": dma_50,
+                    "dma_200": dma_200,
+                    "entry_point": entry_point,
+                    "exit_point": exit_point,
+                    "forecast_50w": forecast_50w,
+                    "entry_signal": entry_signal,
+                    "reasoning": reasoning,
+                    "risk_flag": risk_flag,
+                })
 
-                except Exception as e:
-                    skipped += 1
-                    continue
+            except Exception as e:
+                skipped += 1
+                continue
 
         # Cleanup progress indicators
         progress_bar.empty()

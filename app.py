@@ -3288,14 +3288,14 @@ with tab_scanner:
                 net_income = _safe_float(info.get("netIncomeToCommon"))
                 revenue = _safe_float(info.get("totalRevenue"))
                 ocf_raw_score = 0
-                if ocf and net_income:
-                    ocf_vs_profit = 10 if ocf > net_income else 5
+                if operating_cash_flow and net_income:
+                    ocf_vs_profit = 10 if operating_cash_flow > net_income else 5
                     ocf_raw_score += ocf_vs_profit
                     if revenue:
-                        ocf_ratio = ocf / revenue
+                        ocf_ratio = operating_cash_flow / revenue
                         ocf_ratio_score = max(0, min(5, ocf_ratio * 100))
                         ocf_raw_score += ocf_ratio_score
-                    ocf_positive = 10 if ocf > 0 else 0
+                    ocf_positive = 10 if operating_cash_flow > 0 else 0
                     ocf_raw_score += ocf_positive
                 # Normalize from 25 to 10
                 ocf_normalized_score = (ocf_raw_score / 25) * 10

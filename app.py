@@ -3438,88 +3438,66 @@ with tab_scanner:
                     if week_52_high:
                         exit_point = min(exit_point, week_52_high * 0.95)
 
-                # OCF score (25 pts) - highest weight
-                ocf = _safe_float(info.get("operatingCashflow"))
-                net_income = _safe_float(info.get("netIncomeToCommon"))
-                revenue = _safe_float(info.get("totalRevenue"))
+                    # Generate reasoning based on new scoring
+                    reasons = []
+                    if pe and pe < 15:
+                        reasons.append(f"Low PE ({pe:.1f})")
+                    if roe and roe > 18:
+                        reasons.append(f"High ROE ({roe:.1f}%)")
+                    if roce and roce > 15:
+                        reasons.append(f"High ROCE ({roce:.1f}%)")
+                    if debt_to_equity and debt_to_equity < 0.3:
+                        reasons.append(f"Low debt ({debt_to_equity:.2f})")
+                    if value_score >= 25:
+                        reasons.append("Strong value metrics")
+                    if fundamentals_score >= 30:
+                        reasons.append("Solid fundamentals")
+                    if momentum_score >= 10:
+                        reasons.append("Positive momentum")
 
-                if ocf and net_income:
-                    # OCF > Net Profit (10 pts)
-                    ocf_vs_profit = 10 if ocf > net_income else 5
-                    ocf_score += ocf_vs_profit
+                    reasoning = ", ".join(reasons[:3]) if reasons else "Balanced fundamentals"
 
-                    # OCF to Revenue ratio (5 pts)
-                    if revenue:
-                        ocf_ratio = ocf / revenue
-                        ocf_ratio_score = max(0, min(5, ocf_ratio * 100))
-                        ocf_score += ocf_ratio_score
+                    # Risk flags
+                    risks = []
+                    if debt_to_equity and debt_to_equity > 0.4:
+                        risks.append("Moderate debt")
+                    if promoter_holding and promoter_holding < 50:
+                        risks.append("Low promoter holding")
+                    if pe and pe > 20:
+                        risks.append("High PE")
 
-                    # Positive OCF (10 pts)
-                    ocf_positive = 10 if ocf > 0 else 0
-                    ocf_score += ocf_positive
+                    risk_flag = ", ".join(risks) if risks else None
 
-                score += ocf_score
+                    results.append({
+                        "symbol": sym,
+                        "name": data.get("name", sym.removesuffix(NSE_SUFFIX)),
+                        "sector": data.get("sector", "Unknown"),
+                        "score": round(total_score, 1),
+                        "value_score": round(value_score, 1),
+                        "fundamentals_score": round(fundamentals_score, 1),
+                        "momentum_score": round(momentum_score, 1),
+                        "risk_penalty": round(risk_penalty, 1),
+                        "risk_flags": risk_flags,
+                        "ocf_score": round(ocf_normalized_score, 1),
+                        "current_price": current_price,
+                        "pe": pe,
+                        "pb": pb,
+                        "roe": roe,
+                        "roce": roce,
+                        "debt_to_equity": debt_to_equity,
+                        "dma_50": dma_50,
+                        "dma_200": dma_200,
+                        "entry_point": entry_point,
+                        "exit_point": exit_point,
+                        "forecast_50w": forecast_50w,
+                        "entry_signal": entry_signal,
+                        "reasoning": reasoning,
+                        "risk_flag": risk_flag,
+                    })
 
-                # Generate reasoning
-                reasons = []
-                if pe < 15:
-                    reasons.append(f"Low PE ({pe:.1f})")
-                if eps_growth > 20:
-                    reasons.append(f"Strong EPS growth ({eps_growth:.1f}%)")
-                if debt_to_equity < 0.3:
-                    reasons.append(f"Low debt ({debt_to_equity:.2f})")
-                if roe > 18:
-                    reasons.append(f"High ROE ({roe:.1f}%)")
-                if roce and roce > 15:
-                    reasons.append(f"High ROCE ({roce:.1f}%)")
-                if dma_score >= 7:
-                    reasons.append("Strong DMA trend")
-                if ocf_score > 20:
-                    reasons.append("Strong cash generation")
-
-                reasoning = ", ".join(reasons[:3]) if reasons else "Balanced fundamentals"
-
-                # Risk flags
-                risks = []
-                if debt_to_equity > 0.4:
-                    risks.append("Moderate debt")
-                if promoter_holding < 50:
-                    risks.append("Low promoter holding")
-                if pe > 20:
-                    risks.append("High PE")
-
-                risk_flag = ", ".join(risks) if risks else None
-
-                results.append({
-                    "symbol": sym,
-                    "name": data.get("name", sym.removesuffix(NSE_SUFFIX)),
-                    "sector": data.get("sector", "Unknown"),
-                    "score": round(total_score, 1),
-                    "value_score": round(value_score, 1),
-                    "fundamentals_score": round(fundamentals_score, 1),
-                    "momentum_score": round(momentum_score, 1),
-                    "risk_penalty": round(risk_penalty, 1),
-                    "risk_flags": risk_flags,
-                    "ocf_score": round(ocf_score, 1),
-                    "current_price": current_price,
-                    "pe": pe,
-                    "pb": pb,
-                    "roe": roe,
-                    "roce": roce,
-                    "debt_to_equity": debt_to_equity,
-                    "dma_50": dma_50,
-                    "dma_200": dma_200,
-                    "entry_point": entry_point,
-                    "exit_point": exit_point,
-                    "forecast_50w": forecast_50w,
-                    "entry_signal": entry_signal,
-                    "reasoning": reasoning,
-                    "risk_flag": risk_flag,
-                })
-
-            except Exception as e:
-                skipped += 1
-                continue
+                except Exception as e:
+                    skipped += 1
+                    continue
 
         # Cleanup progress indicators
         progress_bar.empty()

@@ -178,6 +178,10 @@ HOLDINGS_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), ".data", "holdings.json"
 )
 
+SCANNER_RESULTS_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), ".data", "scanner_results.json"
+)
+
 
 def _default_conviction_tiers() -> dict[str, list[str]]:
     return {"1": list(DEFAULT_WATCHLIST), "2": [], "3": []}
@@ -205,6 +209,28 @@ def _save_holdings_to_disk(holdings: list[dict]) -> None:
         os.makedirs(os.path.dirname(HOLDINGS_FILE), exist_ok=True)
         with open(HOLDINGS_FILE, "w", encoding="utf-8") as handle:
             json.dump(holdings, handle, indent=2)
+    except OSError:
+        pass
+
+
+def _load_scanner_results_from_disk() -> dict | None:
+    if not os.path.isfile(SCANNER_RESULTS_FILE):
+        return None
+    try:
+        with open(SCANNER_RESULTS_FILE, encoding="utf-8") as handle:
+            data = json.load(handle)
+        if not isinstance(data, dict):
+            return None
+        return data
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+
+
+def _save_scanner_results_to_disk(scanner_data: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(SCANNER_RESULTS_FILE), exist_ok=True)
+        with open(SCANNER_RESULTS_FILE, "w", encoding="utf-8") as handle:
+            json.dump(scanner_data, handle, indent=2)
     except OSError:
         pass
 
@@ -1347,8 +1373,8 @@ SECTOR_STOCKS = {
     "🛡️ Defence": [
         "HAL.NS", "BEL.NS", "MIDHANI.NS", "BHEL.NS", "BEML.NS", "Mazagon.NS", "GRSE.NS"
     ],
-    "🏦 BFSI": [
-        "HDFCBANK.NS", "ICICIBANK.NS", "SBIN.NS", "KOTAKBANK.NS", "AXISBANK.NS", "BAJFINANCE.NS", "CHOLAFIN.NS"
+    "🔌 Semiconductors": [
+        "TATAELXSI.NS", "MOSCHIP.NS", "SAGEMCOM.NS", "CENTUM.NS", "VLSI.NS", "ORIENTELEC.NS"
     ]
 }
 
@@ -1359,7 +1385,7 @@ def fetch_sector_stocks_data() -> dict:
     sector_data_dict = {}
     for sector, stocks in SECTOR_STOCKS.items():
         sector_data = []
-        for sym in stocks[:4]:  # Get top 4 stocks
+        for sym in stocks[:3]:  # Get top 3 stocks
             try:
                 ticker = yf.Ticker(sym)
                 info = ticker.info or {}
@@ -1390,15 +1416,15 @@ def fetch_sector_stocks_data() -> dict:
             except Exception:
                 pass
         
-        # Sort by market cap (descending) and keep top 4
+        # Sort by market cap (descending) and keep top 3
         sector_data.sort(key=lambda x: x["market_cap"] or 0, reverse=True)
-        sector_data_dict[sector] = sector_data[:4]
+        sector_data_dict[sector] = sector_data[:3]
     
     return sector_data_dict
 
 
 def render_sector_stocks() -> None:
-    """Display top 4 stocks from each sector with key metrics in compact format."""
+    """Display top 3 stocks from each sector with key metrics in compact format."""
     sector_data_dict = fetch_sector_stocks_data()
     
     for sector, stocks in sector_data_dict.items():
@@ -1408,13 +1434,16 @@ def render_sector_stocks() -> None:
         # Display each stock with metrics in pipe-separated format
         for stock in stocks:
             pe_str = f"PE {stock['pe']:.1f}" if stock['pe'] else "PE -"
-            change_str = f"{stock['change_1w']:+.1f}%" if stock['change_1w'] is not None else "-"
+            change_str = f"{stock['change_1w']:+.1f}%" if stock['change_1w'] is not None else ""
             
             # Single line with pipe-separated format including button
-            stock_line = f"{stock['name']} || ₹{stock['price']:.0f} || {pe_str} || {change_str}"
+            if change_str:
+                stock_line = f"{stock['name']} || ₹{stock['price']:.0f} || {pe_str} || {change_str}"
+            else:
+                stock_line = f"{stock['name']} || ₹{stock['price']:.0f} || {pe_str}"
             
             # Display line with inline button
-            if st.sidebar.button(f"{stock_line} 📊", key=f"sector_open_{stock['symbol']}", help=f"Open {stock['name']}", use_container_width=True):
+            if st.sidebar.button(f"{stock_line}", key=f"sector_open_{stock['symbol']}", help=f"Open {stock['name']}", use_container_width=True):
                 st.session_state["selected_symbol"] = stock['symbol']
                 st.rerun()
         
@@ -1653,6 +1682,18 @@ if "selected_symbol" not in st.session_state:
     _wl = all_conviction_symbols()
     st.session_state["selected_symbol"] = _wl[0] if _wl else None
 
+# Initialize scanner results from disk for persistence across refreshes
+if "scanner_results" not in st.session_state:
+    loaded_scanner = _load_scanner_results_from_disk()
+    if loaded_scanner:
+        st.session_state["scanner_results"] = loaded_scanner.get("results", [])
+        st.session_state["scanner_skipped"] = loaded_scanner.get("skipped", 0)
+        st.session_state["scanner_timestamp"] = loaded_scanner.get("timestamp", "")
+    else:
+        st.session_state["scanner_results"] = []
+        st.session_state["scanner_skipped"] = 0
+        st.session_state["scanner_timestamp"] = ""
+
 
 st.set_page_config(
     page_title=_active_page_title(st.session_state.get("selected_symbol")),
@@ -1828,8 +1869,8 @@ def inject_global_styles() -> None:
             align-items: flex-end;
             justify-content: space-between;
             gap: 12px;
-            margin-bottom: 1.25rem;
-            padding-bottom: 1rem;
+            margin-bottom: 0.5rem;
+            padding-bottom: 0.5rem;
             border-bottom: 1px solid var(--border);
         }
 
@@ -2157,6 +2198,15 @@ def inject_global_styles() -> None:
 
         #MainMenu {visibility: hidden;}
         footer {visibility: hidden;}
+
+        /* Hide deploy button by default, show on hover */
+        [data-testid="stDeployButton"] {
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+        [data-testid="stDeployButton"]:hover {
+            opacity: 1;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -2804,63 +2854,61 @@ if "selected_symbol" not in st.session_state:
     wl = get_watchlist()
     st.session_state["selected_symbol"] = wl[0] if wl else None
 
-with st.container(border=True):
-    st.markdown('<p class="toolbar-card-label">Search & add to watchlist</p>', unsafe_allow_html=True)
-    top_left, top_mid, top_right = st.columns([4, 1, 1.4])
-    with top_left:
-        search_query = st.text_input(
-            "Search NSE stock",
-            placeholder="Type a letter to see matches…",
-            key="nse_search_input",
-            label_visibility="collapsed",
-        )
-        needle = search_query.strip()
-        if len(needle) >= 1:
-            suggestions = fuzzy_search_nse(needle, limit=8)
-            if suggestions:
-                st.markdown(
-                    '<p class="suggest-label">Matching NSE stocks — click to load</p>',
-                    unsafe_allow_html=True,
-                )
-                suggest_cols = st.columns(4)
-                for idx, (sym, company_name) in enumerate(suggestions):
-                    with suggest_cols[idx % 4]:
-                        st.markdown(
-                            f'<div class="suggest-card">'
-                            f'<p class="suggest-name"><strong>{sym}</strong><br/>'
-                            f"{company_name[:48]}</p></div>",
-                            unsafe_allow_html=True,
-                        )
-                        btn_col1, btn_col2 = st.columns(2)
-                        with btn_col1:
-                            if st.button(
-                                "Open",
-                                key=f"fuzzy_pick_{sym}_{idx}",
-                                use_container_width=True,
-                                help=f"Load {sym} — {company_name}",
-                            ):
-                                st.session_state["selected_symbol"] = f"{sym}{NSE_SUFFIX}"
-                                st.rerun()
-                        with btn_col2:
-                            ticker_with_suffix = f"{sym}{NSE_SUFFIX}"
-                            if st.button(
-                                "+ Add",
-                                key=f"fuzzy_add_{sym}_{idx}",
-                                use_container_width=True,
-                                help=f"Add {sym} to watchlist",
-                            ):
-                                if ticker_with_suffix in get_watchlist():
-                                    st.info(f"{ticker_with_suffix} is already in your watchlist.")
-                                else:
-                                    add_to_conviction(ticker_with_suffix, "1")
-                                    st.success(f"Added {ticker_with_suffix} to watchlist.")
-                                st.rerun()
-            else:
-                st.caption("No NSE matches yet — keep typing or try the full ticker.")
-    with top_mid:
-        search_clicked = st.button("Search", use_container_width=True)
-    with top_right:
-        refresh_clicked = st.button("🔄 Refresh data", use_container_width=True)
+top_left, top_mid, top_right = st.columns([4, 1, 1.4])
+with top_left:
+    search_query = st.text_input(
+        "Search NSE stock",
+        placeholder="Type a letter to see matches…",
+        key="nse_search_input",
+        label_visibility="collapsed",
+    )
+    needle = search_query.strip()
+    if len(needle) >= 1:
+        suggestions = fuzzy_search_nse(needle, limit=8)
+        if suggestions:
+            st.markdown(
+                '<p class="suggest-label">Matching NSE stocks — click to load</p>',
+                unsafe_allow_html=True,
+            )
+            suggest_cols = st.columns(4)
+            for idx, (sym, company_name) in enumerate(suggestions):
+                with suggest_cols[idx % 4]:
+                    st.markdown(
+                        f'<div class="suggest-card">'
+                        f'<p class="suggest-name"><strong>{sym}</strong><br/>'
+                        f"{company_name[:48]}</p></div>",
+                        unsafe_allow_html=True,
+                    )
+                    btn_col1, btn_col2 = st.columns(2)
+                    with btn_col1:
+                        if st.button(
+                            "Open",
+                            key=f"fuzzy_pick_{sym}_{idx}",
+                            use_container_width=True,
+                            help=f"Load {sym} — {company_name}",
+                        ):
+                            st.session_state["selected_symbol"] = f"{sym}{NSE_SUFFIX}"
+                            st.rerun()
+                    with btn_col2:
+                        ticker_with_suffix = f"{sym}{NSE_SUFFIX}"
+                        if st.button(
+                            "+ Add",
+                            key=f"fuzzy_add_{sym}_{idx}",
+                            use_container_width=True,
+                            help=f"Add {sym} to watchlist",
+                        ):
+                            if ticker_with_suffix in get_watchlist():
+                                st.info(f"{ticker_with_suffix} is already in your watchlist.")
+                            else:
+                                add_to_conviction(ticker_with_suffix, "1")
+                                st.success(f"Added {ticker_with_suffix} to watchlist.")
+                            st.rerun()
+        else:
+            st.caption("No NSE matches yet — keep typing or try the full ticker.")
+with top_mid:
+    search_clicked = st.button("Search", use_container_width=True)
+with top_right:
+    refresh_clicked = st.button("🔄 Refresh data", use_container_width=True)
 
 if refresh_clicked:
     st.cache_data.clear()
@@ -3086,7 +3134,7 @@ with tab_scanner:
     # Scanner controls
     col1, col2, col3 = st.columns(3)
     with col1:
-        num_stocks = st.selectbox("Number of stocks to screen", [50, 100, 200, 500], index=1)
+        num_stocks = st.selectbox("Number of stocks to screen", [50, 100, 500], index=1)
     with col2:
         min_score = st.slider("Minimum Dark Horse Score", 0, 100, 60)
     with col3:
@@ -3532,6 +3580,13 @@ with tab_scanner:
         st.session_state["scanner_results"] = filtered_results
         st.session_state["scanner_skipped"] = skipped
         st.session_state["scanner_timestamp"] = datetime.now().strftime("%d %b %Y, %I:%M %p")
+
+        # Save scanner results to disk for persistence across refreshes
+        _save_scanner_results_to_disk({
+            "results": filtered_results,
+            "skipped": skipped,
+            "timestamp": st.session_state["scanner_timestamp"]
+        })
 
         st.success(f"Scan complete! Found {len(filtered_results)} dark horse candidates out of {len(stocks_to_screen)} stocks screened.")
         st.rerun()

@@ -11,6 +11,7 @@ from io import StringIO
 import feedparser
 import pandas as pd
 import plotly.express as px
+import requests
 import streamlit as st
 import yfinance as yf
 
@@ -1373,8 +1374,8 @@ SECTOR_STOCKS = {
     "🛡️ Defence": [
         "HAL.NS", "BEL.NS", "MIDHANI.NS", "BHEL.NS", "BEML.NS", "Mazagon.NS", "GRSE.NS"
     ],
-    "🔌 Semiconductors": [
-        "TATAELXSI.NS", "MOSCHIP.NS", "SAGEMCOM.NS", "CENTUM.NS", "VLSI.NS", "ORIENTELEC.NS"
+    "🏦 BFSI": [
+        "HDFCBANK.NS", "ICICIBANK.NS", "SBIN.NS", "KOTAKBANK.NS", "AXISBANK.NS", "BAJFINANCE.NS", "CHOLAFIN.NS"
     ]
 }
 
@@ -1385,7 +1386,7 @@ def fetch_sector_stocks_data() -> dict:
     sector_data_dict = {}
     for sector, stocks in SECTOR_STOCKS.items():
         sector_data = []
-        for sym in stocks[:3]:  # Get top 3 stocks
+        for sym in stocks[:4]:  # Get top 4 stocks
             try:
                 ticker = yf.Ticker(sym)
                 info = ticker.info or {}
@@ -1416,15 +1417,15 @@ def fetch_sector_stocks_data() -> dict:
             except Exception:
                 pass
         
-        # Sort by market cap (descending) and keep top 3
+        # Sort by market cap (descending) and keep top 4
         sector_data.sort(key=lambda x: x["market_cap"] or 0, reverse=True)
-        sector_data_dict[sector] = sector_data[:3]
+        sector_data_dict[sector] = sector_data[:4]
     
     return sector_data_dict
 
 
 def render_sector_stocks() -> None:
-    """Display top 3 stocks from each sector with key metrics in compact format."""
+    """Display top 4 stocks from each sector with key metrics in compact format."""
     sector_data_dict = fetch_sector_stocks_data()
     
     for sector, stocks in sector_data_dict.items():
@@ -3132,54 +3133,30 @@ with tab_scanner:
     )
 
     # Scanner controls
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     with col1:
-        num_stocks = st.selectbox("Number of stocks to screen", [50, 100, 500], index=1)
-    with col2:
         min_score = st.slider("Minimum Dark Horse Score", 0, 100, 60)
-    with col3:
+    with col2:
         scan_btn = st.button("Run Scanner", use_container_width=True)
 
     if scan_btn:
-        # Use top N stocks from NIFTY 50, 100, 200, 500 as proxy for screening
-        # In production, you'd use nsepython or jugaad-trader to get full NSE list
-        nse_stocks = [
-            "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
-            "HINDUNILVR.NS", "SBIN.NS", "BHARTIARTL.NS", "ITC.NS", "KOTAKBANK.NS",
-            "LICI.NS", "AXISBANK.NS", "LT.NS", "BAJFINANCE.NS", "WIPRO.NS",
-            "TATAMOTORS.NS", "MARUTI.NS", "HCLTECH.NS", "SUNPHARMA.NS", "TITAN.NS",
-            "NTPC.NS", "ULTRACEMCO.NS", "POWERGRID.NS", "BAJAJ-AUTO.NS", "NESTLEIND.NS",
-            "DRREDDY.NS", "ASIANPAINT.NS", "TATASTEEL.NS", "MAHINDRA.NS", "JSWSTEEL.NS",
-            "DIVISLAB.NS", "M&M.NS", "ADANIENT.NS", "TATACONSUM.NS", "HINDALCO.NS",
-            "CIPLA.NS", "GRASIM.NS", "WELCORP.NS", "DLF.NS", "BRITANNIA.NS",
-            "EICHERMOT.NS", "HEROMOTOCO.NS", "ACC.NS", "AMBUJACEM.NS", "ZOMATO.NS",
-            "DMART.NS", "PERSISTENT.NS", "TRENT.NS", "APOLLOHOSP.NS", "BERGEPAINT.NS",
-            # Additional stocks for 100+ screening
-            "GODREJCP.NS", "HINDALCO.NS", "TATASTEEL.NS", "JSWSTEEL.NS", "COALINDIA.NS",
-            "ONGC.NS", "IOC.NS", "BPCL.NS", "GAIL.NS", "MUTHOOTFIN.NS",
-            "BAJAJFINSV.NS", "CHOLAHLDNG.NS", "IBULHSGFIN.NS", "MFIN.NS", "TATASTEEL.NS",
-            "UPL.NS", "DABUR.NS", "GODREJPROP.NS", "PIIND.NS", "LUPIN.NS",
-            "CADILAHC.NS", "AUROPHARMA.NS", "ALKEM.NS", "BIOCON.NS", "JUBLPHARM.NS",
-            "MRF.NS", "APOLLOTYRE.NS", "CEAT.NS", "JKTYRE.NS", "BRIDGETYRE.NS",
-            "EXIDEIND.NS", "AMARAJABAT.NS", "HCLTECH.NS", "TECHM.NS", "MPHASIS.NS",
-            "LTIM.NS", "COFORGE.NS", "PERSISTENT.NS", "TATAELXSI.NS", "LTIM.NS",
-            "IDFCFIRSTB.NS", "FEDERALBNK.NS", "BANDHANBNK.NS", "RBLBANK.NS", "INDUSINDBK.NS",
-            "AUBANK.NS", "J&KBANK.NS", "KARURVYSYA.NS", "SOUTHBANK.NS", "DCBBANK.NS",
-            "TATACHEM.NS", "NAVINFLUOR.NS", "PIIND.NS", "SRF.NS", "DEEPAKNTR.NS",
-            "GUJALKALI.NS", "TATACONSUM.NS", "BRITANNIA.NS", "HINDUNILVR.NS", "ITC.NS",
-            "NESTLEIND.NS", "DMART.NS", "TRENT.NS", "VBL.NS", "TANLA.NS",
-            "GRINDWELL.NS", "SANDHAR.NS", "BALKRISIND.NS", "MOTHERSON.NS", "BOSCHLTD.NS",
-            "M&MFIN.NS", "BAJFINANCE.NS", "CHOLAFIN.NS", "MUTHOOTFIN.NS", "MANAPPURAM.NS",
-            "TATAPOWER.NS", "ADANIPORTS.NS", "GMRINFRA.NS", "L&TINFRA.NS", "IRB.NS",
-            "PNCINFRA.NS", "RECLTD.NS", "PFC.NS", "REC.NS", "HUDCO.NS",
-            "DLF.NS", "GODREJPROP.NS", "BRIGADE.NS", "PHOENIXLTD.NS", "OBEROIRLTY.NS",
-            "PRESTIGE.NS", "GODREJWOOD.NS", "MAHINDRALIFE.NS", "HDFCLIFE.NS", "ICICIPRULI.NS",
-            "SBILIFE.NS", "MAXFIN.NS", "PNBGRIFFIN.NS", "TATAMOTORS.NS", "M&M.NS",
-            "MARUTI.NS", "EICHERMOT.NS", "BAJAJ-AUTO.NS", "HEROMOTOCO.NS", "TATAMTRDVR.NS",
-        ]
-
-        # Limit to selected number
-        stocks_to_screen = nse_stocks[:num_stocks]
+        # Fetch Nifty 500 stocks
+        try:
+            url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            
+            # Parse CSV
+            df = pd.read_csv(pd.io.common.StringIO(response.text))
+            
+            # Extract symbols and add .NS suffix
+            symbols = df['Symbol'].tolist()
+            stocks_to_screen = [f"{sym}.NS" for sym in symbols]
+            
+            st.info(f"Fetched {len(stocks_to_screen)} stocks from Nifty 500")
+        except Exception as e:
+            st.error(f"Failed to fetch Nifty 500 stocks: {e}")
+            stocks_to_screen = []
 
         results = []
         skipped = 0

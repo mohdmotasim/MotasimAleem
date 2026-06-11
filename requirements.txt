@@ -9,6 +9,7 @@ streamlit==1.36.0
 
 # Market data
 yfinance==0.2.38
+nsepython>=2.0
 
 # Data manipulation
 pandas>=2.0.0

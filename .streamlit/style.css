@@ -1,0 +1,36 @@
+/* Dark Horse Badge Styles */
+.dh-wrap {
+    position: relative;
+    display: inline-block;
+}
+
+.dh-badge {
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-weight: 600;
+    font-size: 14px;
+    display: inline-block;
+}
+
+.dh-green {
+    background-color: #22c55e;
+    color: white;
+}
+
+.dh-amber {
+    background-color: #f59e0b;
+    color: white;
+}
+
+.dh-red {
+    background-color: #ef4444;
+    color: white;
+}
+
+/* News Summary Styles */
+.news-summary {
+    background-color: #2D2D2D;
+    padding: 12px;
+    border-radius: 6px;
+    margin-bottom: 12px;
+}

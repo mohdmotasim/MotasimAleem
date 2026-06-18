@@ -3,10 +3,12 @@ import json
 import os
 import re
 import statistics
+import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
 from io import StringIO
+from pathlib import Path
 
 import feedparser
 import pandas as pd
@@ -19,6 +21,10 @@ NSE_SUFFIX = ".NS"
 SP500_SYMBOL = "^GSPC"
 DEFAULT_WATCHLIST = ["RELIANCE.NS", "TCS.NS", "INFY.NS"]
 NSE_EQUITY_CSV_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+
+# Cache directory for holdings data
+HOLDINGS_CACHE_DIR = Path(".data/holdings_cache")
+HOLDINGS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 FALLBACK_NSE_SYMBOLS = [
     ("RELIANCE", "Reliance Industries"),
     ("TCS", "Tata Consultancy Services"),
@@ -68,6 +74,294 @@ def _active_page_title(symbol: str | None) -> str:
     if not symbol:
         return "NSE Dashboard"
     return f"{symbol.removesuffix(NSE_SUFFIX)} | NSE Dashboard"
+
+
+# Mutual Fund API Functions
+@st.cache_data(ttl=300)
+def search_mutual_funds(query: str) -> list[dict]:
+    """Search mutual funds using mfapi.in API."""
+    if not query or len(query.strip()) < 2:
+        return []
+    try:
+        url = f"https://api.mfapi.in/mf/search?q={query.strip()}"
+        response = requests.get(url, timeout=30)  # Increased timeout from 10 to 30 seconds
+        response.raise_for_status()
+        data = response.json()
+        return data if isinstance(data, list) else []
+    except requests.exceptions.Timeout:
+        st.warning("Search timed out. The API is slow. Try again in a moment.")
+        return []
+    except Exception as e:
+        st.error(f"Error searching funds: {e}")
+        return []
+
+
+@st.cache_data(ttl=60)
+def get_latest_nav(scheme_code: str) -> dict | None:
+    """Get latest NAV for a mutual fund scheme."""
+    try:
+        url = f"https://api.mfapi.in/mf/{scheme_code}/latest"
+        response = requests.get(url, timeout=60)  # Increased timeout to 60 seconds
+        response.raise_for_status()
+        data = response.json()
+        
+        # Handle the actual API response format: {meta: {...}, data: [{date, nav}], status: "SUCCESS"}
+        if data and isinstance(data, dict):
+            if "data" in data and isinstance(data["data"], list) and len(data["data"]) > 0:
+                # Return the most recent NAV entry
+                nav_entry = data["data"][0]
+                # Ensure nav is a float
+                if "nav" in nav_entry and isinstance(nav_entry["nav"], str):
+                    nav_entry["nav"] = float(nav_entry["nav"])
+                return nav_entry
+            else:
+                st.error(f"No NAV data found in response for {scheme_code}")
+                return None
+        elif data and isinstance(data, list) and len(data) > 0:
+            # Handle case where API returns list directly
+            nav_entry = data[0]
+            # Ensure nav is a float
+            if "nav" in nav_entry and isinstance(nav_entry["nav"], str):
+                nav_entry["nav"] = float(nav_entry["nav"])
+            return nav_entry
+        else:
+            st.error(f"Unexpected NAV data format for {scheme_code}")
+            return None
+    except requests.exceptions.Timeout:
+        st.error("NAV fetch timed out. The API is very slow. Try again in a moment.")
+        return None
+    except Exception as e:
+        st.error(f"Error fetching latest NAV: {e}")
+        return None
+
+
+@st.cache_data(ttl=300)
+def get_historical_nav(scheme_code: str) -> list[dict]:
+    """Get historical NAV data for a mutual fund scheme."""
+    try:
+        url = f"https://api.mfapi.in/mf/{scheme_code}"
+        response = requests.get(url, timeout=60)  # Increased timeout to 60 seconds
+        response.raise_for_status()
+        data = response.json()
+        if data and isinstance(data, dict) and "data" in data:
+            return data["data"]
+        return []
+    except requests.exceptions.Timeout:
+        # Silent timeout - historical data is optional
+        return []
+    except Exception as e:
+        # Silent fallback - historical data unavailable
+        return []
+
+
+@st.cache_data(ttl=300)
+def get_scheme_details(scheme_code: str) -> dict | None:
+    """Get scheme details including fund house and category."""
+    try:
+        url = f"https://api.mfapi.in/mf/{scheme_code}"
+        response = requests.get(url, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+        if data and isinstance(data, dict) and "meta" in data:
+            return data["meta"]
+        return None
+    except requests.exceptions.Timeout:
+        st.warning("Scheme details fetch timed out. Try again in a moment.")
+        return None
+    except Exception as e:
+        st.error(f"Error fetching scheme details: {e}")
+        return None
+
+
+def _get_holdings_cache_path(scheme_code: str) -> Path:
+    """Get the cache file path for a scheme's holdings data."""
+    return HOLDINGS_CACHE_DIR / f"{scheme_code}.json"
+
+
+def _load_holdings_from_cache(scheme_code: str) -> dict | None:
+    """Load holdings data from cache if available and not too old."""
+    cache_path = _get_holdings_cache_path(scheme_code)
+    if cache_path.exists():
+        try:
+            with open(cache_path, 'r') as f:
+                cached_data = json.load(f)
+            
+            # Check if cache is older than 7 days
+            cache_date = datetime.fromisoformat(cached_data.get('cached_at', ''))
+            if datetime.now() - cache_date < timedelta(days=7):
+                return cached_data
+        except Exception as e:
+            st.warning(f"Error loading cached holdings: {e}")
+    return None
+
+
+def _save_holdings_to_cache(scheme_code: str, data: dict) -> None:
+    """Save holdings data to cache with timestamp."""
+    cache_path = _get_holdings_cache_path(scheme_code)
+    try:
+        cache_data = {
+            'cached_at': datetime.now().isoformat(),
+            'data': data
+        }
+        with open(cache_path, 'w') as f:
+            json.dump(cache_data, f)
+    except Exception as e:
+        st.warning(f"Error saving holdings to cache: {e}")
+
+
+@st.cache_data(ttl=300)
+def get_fund_holdings(scheme_code: str, force_refresh: bool = False) -> dict:
+    """Get fund holdings from mfdata.in API with retry logic and caching."""
+    
+    # Try to load from cache first (unless force refresh)
+    if not force_refresh:
+        cached_data = _load_holdings_from_cache(scheme_code)
+        if cached_data:
+            cache_age_days = (datetime.now() - datetime.fromisoformat(cached_data.get('cached_at', ''))).days
+            return {
+                'status': 'cached',
+                'data': cached_data.get('data'),
+                'as_of_date': cached_data.get('cached_at'),
+                'cache_age_days': cache_age_days,
+                'source': 'cache'
+            }
+    
+    # Try to fetch from API with retry logic
+    max_retries = 3
+    retry_delays = [1, 2, 4]  # Exponential backoff: 1s, 2s, 4s
+    
+    for attempt in range(max_retries):
+        try:
+            # Try different endpoint variations
+            endpoints = [
+                f"https://mfdata.in/api/v1/schemes/{scheme_code}",
+                f"https://mfdata.in/api/holdings/{scheme_code}",
+                f"https://mfdata.in/api/v1/families/{scheme_code}/holdings"
+            ]
+            
+            for url in endpoints:
+                try:
+                    response = requests.get(url, timeout=60)
+                    response.raise_for_status()
+                    data = response.json()
+                    
+                    if data and isinstance(data, dict):
+                        # Save to cache on success
+                        _save_holdings_to_cache(scheme_code, data)
+                        
+                        return {
+                            'status': 'success',
+                            'data': data,
+                            'as_of_date': datetime.now().isoformat(),
+                            'cache_age_days': 0,
+                            'source': 'live'
+                        }
+                except requests.exceptions.HTTPError as e:
+                    if e.response.status_code == 404:
+                        continue  # Try next endpoint
+                    raise
+                except Exception:
+                    continue  # Try next endpoint
+            
+            # If all endpoints failed, try next retry
+            if attempt < max_retries - 1:
+                time.sleep(retry_delays[attempt])
+                
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code >= 500:
+                # Server error, retry with backoff
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delays[attempt])
+                    continue
+            else:
+                # Client error, don't retry
+                break
+        except requests.exceptions.Timeout:
+            # Timeout, retry with backoff
+            if attempt < max_retries - 1:
+                time.sleep(retry_delays[attempt])
+                continue
+        except Exception as e:
+            # Other error, don't retry
+            st.warning(f"Error fetching holdings: {e}")
+            break
+    
+    # All retries failed, try to return cached data if available (even if old)
+    cached_data = _load_holdings_from_cache(scheme_code)
+    if cached_data:
+        cache_age_days = (datetime.now() - datetime.fromisoformat(cached_data.get('cached_at', ''))).days
+        return {
+            'status': 'cached_fallback',
+            'data': cached_data.get('data'),
+            'as_of_date': cached_data.get('cached_at'),
+            'cache_age_days': cache_age_days,
+            'source': 'cache'
+        }
+    
+    # No cache available, return unavailable status
+    return {
+        'status': 'unavailable',
+        'data': None,
+        'as_of_date': None,
+        'cache_age_days': None,
+        'source': None
+    }
+
+
+def calculate_returns(historical_data: list[dict]) -> dict:
+    """Calculate 1Y, 3Y, 5Y returns from historical NAV data."""
+    if not historical_data:
+        return {"1Y": None, "3Y": None, "5Y": None}
+    
+    today = datetime.now()
+    returns = {}
+    
+    # Get latest NAV
+    latest_nav = None
+    latest_date = None
+    if historical_data:
+        latest_entry = historical_data[0]
+        latest_nav = float(latest_entry.get("nav", 0))
+        latest_date_str = latest_entry.get("date")
+        if latest_date_str:
+            try:
+                latest_date = datetime.strptime(latest_date_str, "%d-%m-%Y")
+            except:
+                pass
+    
+    if not latest_nav or not latest_date:
+        return returns
+    
+    # Calculate returns for different periods
+    periods = {
+        "1Y": 365,
+        "3Y": 1095,
+        "5Y": 1825
+    }
+    
+    for period_name, days in periods.items():
+        target_date = latest_date - timedelta(days=days)
+        target_nav = None
+        
+        for entry in historical_data:
+            entry_date_str = entry.get("date")
+            if entry_date_str:
+                try:
+                    entry_date = datetime.strptime(entry_date_str, "%d-%m-%Y")
+                    if entry_date <= target_date:
+                        target_nav = float(entry.get("nav", 0))
+                        break
+                except:
+                    continue
+        
+        if target_nav and target_nav > 0:
+            years = days / 365.25
+            cagr = ((latest_nav / target_nav) ** (1 / years) - 1) * 100
+            returns[period_name] = round(cagr, 2)
+        else:
+            returns[period_name] = None
+    
+    return returns
 
 
 @st.cache_data(ttl=86400)
@@ -183,6 +477,10 @@ SCANNER_RESULTS_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), ".data", "scanner_results.json"
 )
 
+MF_PORTFOLIO_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), ".data", "mf_portfolio.json"
+)
+
 
 def _default_conviction_tiers() -> dict[str, list[str]]:
     return {"1": list(DEFAULT_WATCHLIST), "2": [], "3": []}
@@ -190,6 +488,29 @@ def _default_conviction_tiers() -> dict[str, list[str]]:
 
 def _default_holdings() -> list[dict]:
     return []
+
+
+def _default_mf_portfolio() -> list[dict]:
+    return []
+
+
+def _load_mf_portfolio_from_disk() -> list[dict] | None:
+    if not os.path.isfile(MF_PORTFOLIO_FILE):
+        return None
+    try:
+        with open(MF_PORTFOLIO_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _save_mf_portfolio_to_disk(portfolio: list[dict]) -> None:
+    try:
+        os.makedirs(os.path.dirname(MF_PORTFOLIO_FILE), exist_ok=True)
+        with open(MF_PORTFOLIO_FILE, "w") as f:
+            json.dump(portfolio, f, indent=2)
+    except Exception as e:
+        st.error(f"Failed to save MF portfolio: {e}")
 
 
 def _load_holdings_from_disk() -> list[dict] | None:
@@ -1166,127 +1487,250 @@ def _gross_margin_trend(ticker: yf.Ticker, info: dict) -> tuple[float | None, st
 
 
 def compute_dark_horse_score(sym: str, info: dict, ticker: yf.Ticker) -> dict:
-    components: dict[str, dict] = {}
-    weighted_total = 0.0
-    weight_used = 0.0
-
-    sector = info.get("sector")
-    fcf_yield = _fcf_yield_from_info(info)
-    sector_median = get_sector_median_fcf_yield(sector)
-    if fcf_yield is not None and sector_median > 0:
-        relative = fcf_yield / sector_median
-        comp_score = _scale_linear(relative, 0.5, 2.0)
-        detail = f"FCF yield {fcf_yield*100:.2f}% vs sector median {sector_median*100:.2f}%"
-    else:
-        comp_score = 50.0
-        detail = "FCF yield vs sector median unavailable"
-    components["fcf_yield"] = {"score": comp_score, "weight_pct": 25, "detail": detail}
-    weighted_total += comp_score * DARK_HORSE_WEIGHTS["fcf_yield"]
-    weight_used += DARK_HORSE_WEIGHTS["fcf_yield"]
-
-    rev_growth, rev_detail = _revenue_cagr_3y(ticker, info)
-    if rev_growth is not None:
-        comp_score = _scale_linear(rev_growth, -5, 25)
-    else:
-        comp_score = 50.0
-    components["revenue_cagr"] = {"score": comp_score, "weight_pct": 20, "detail": rev_detail}
-    weighted_total += comp_score * DARK_HORSE_WEIGHTS["revenue_cagr"]
-    weight_used += DARK_HORSE_WEIGHTS["revenue_cagr"]
-
-    analysts = _safe_float(info.get("numberOfAnalystOpinions"))
-    if analysts is not None:
-        comp_score = _scale_linear(30 - analysts, 0, 30)
-        detail = f"{int(analysts)} analysts (fewer coverage = higher dark-horse score)"
-    else:
-        comp_score = 50.0
-        detail = "Analyst coverage count unavailable"
-    components["analyst_inverse"] = {"score": comp_score, "weight_pct": 15, "detail": detail}
-    weighted_total += comp_score * DARK_HORSE_WEIGHTS["analyst_inverse"]
-    weight_used += DARK_HORSE_WEIGHTS["analyst_inverse"]
-
-    inst = _safe_float(info.get("heldPercentInstitutions"))
-    if inst is not None:
-        inst_pct = inst * 100 if inst <= 1 else inst
-        comp_score = _scale_linear(80 - inst_pct, 0, 80)
-        detail = f"{inst_pct:.1f}% institutional ownership (lower = higher score)"
-    else:
-        comp_score = 50.0
-        detail = "Institutional ownership unavailable"
-    components["inst_inverse"] = {"score": comp_score, "weight_pct": 15, "detail": detail}
-    weighted_total += comp_score * DARK_HORSE_WEIGHTS["inst_inverse"]
-    weight_used += DARK_HORSE_WEIGHTS["inst_inverse"]
-
-    insider_ratio, insider_detail = _insider_buy_sell_ratio_6m(ticker)
-    if insider_ratio is not None:
-        comp_score = _scale_linear(insider_ratio, 0.3, 2.5)
-    else:
-        comp_score = 50.0
-    components["insider_ratio"] = {"score": comp_score, "weight_pct": 15, "detail": insider_detail}
-    weighted_total += comp_score * DARK_HORSE_WEIGHTS["insider_ratio"]
-    weight_used += DARK_HORSE_WEIGHTS["insider_ratio"]
-
-    gm_change, gm_detail = _gross_margin_trend(ticker, info)
-    if gm_change is not None:
-        if "snapshot" in gm_detail.lower():
-            comp_score = _scale_linear(gm_change, 15, 55)
-        else:
-            comp_score = _scale_linear(gm_change, -5, 10)
-    else:
-        comp_score = 50.0
-    components["gm_trend"] = {"score": comp_score, "weight_pct": 10, "detail": gm_detail}
-    weighted_total += comp_score * DARK_HORSE_WEIGHTS["gm_trend"]
-    weight_used += DARK_HORSE_WEIGHTS["gm_trend"]
-
-    # P/E ratio component - lower P/E is generally better for value
-    pe_ratio = _safe_float(info.get("trailingPE") or info.get("forwardPE"))
-    if pe_ratio is not None and pe_ratio > 0:
-        comp_score = _scale_linear(50 - pe_ratio, 0, 50)
-        detail = f"P/E ratio {pe_ratio:.2f} (lower = higher score)"
-    else:
-        comp_score = 50.0
-        detail = "P/E ratio unavailable"
-    components["pe_ratio"] = {"score": comp_score, "weight_pct": 15, "detail": detail}
-    weighted_total += comp_score * DARK_HORSE_WEIGHTS["pe_ratio"]
-    weight_used += DARK_HORSE_WEIGHTS["pe_ratio"]
-
-    # Operating cash flow component - higher is better
+    """New 4-category Dark Horse scoring system as per requirements."""
+    
+    # Get fundamental metrics
+    pe = _safe_float(info.get("trailingPE") or info.get("forwardPE"))
+    pb = _safe_float(info.get("priceToBook"))
+    debt_to_equity = _safe_float(info.get("debtToEquity"))
+    roe = _safe_float(info.get("returnOnEquity"))
+    if roe and abs(roe) <= 1:
+        roe *= 100
+    roce = _safe_float(info.get("returnOnAssets"))  # Proxy for ROCE
+    if roce and abs(roce) <= 1:
+        roce *= 100
     ocf = _safe_float(info.get("operatingCashflow"))
     mcap = _safe_float(info.get("marketCap"))
-    if ocf is not None and mcap is not None and mcap > 0:
-        ocf_yield = ocf / mcap
-        comp_score = _scale_linear(ocf_yield * 100, 0, 15)
-        detail = f"Operating cash flow yield {ocf_yield*100:.2f}%"
+    
+    # Get price data
+    current_price = _safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
+    week_52_high = _safe_float(info.get("fiftyTwoWeekHigh"))
+    
+    # Calculate DMAs
+    dma_50 = None
+    dma_200 = None
+    try:
+        hist = ticker.history(period="1y")
+        if len(hist) >= 50:
+            dma_50 = hist['Close'].tail(50).mean()
+        if len(hist) >= 200:
+            dma_200 = hist['Close'].tail(200).mean()
+    except:
+        pass
+    
+    # Get sector median PE (simplified - could be made sector-specific)
+    sector_median_pe = 20  # Default sector median
+    
+    # CATEGORY 1 — VALUE (43 pts total - increased from 35 to emphasize price position)
+    value_score = 0.0
+    value_details = {}
+    
+    # PE ratio vs sector median → 12 pts
+    if pe is not None:
+        pe_discount_pct = ((sector_median_pe - pe) / sector_median_pe) * 100
+        if pe_discount_pct >= 20:
+            pe_vs_sector_score = 12.0
+        elif pe_discount_pct <= 0:
+            pe_vs_sector_score = 0.0
+        else:
+            pe_vs_sector_score = (pe_discount_pct / 20) * 12
+        pe_vs_sector_score = max(0.0, min(12.0, pe_vs_sector_score))
+        value_details["pe_vs_sector"] = {"score": pe_vs_sector_score, "max": 12, "detail": f"PE {pe:.1f} vs median {sector_median_pe} ({pe_discount_pct:+.1f}%)"}
     else:
-        comp_score = 50.0
-        detail = "Operating cash flow unavailable"
-    components["operating_cashflow"] = {"score": comp_score, "weight_pct": 10, "detail": detail}
-    weighted_total += comp_score * DARK_HORSE_WEIGHTS["operating_cashflow"]
-    weight_used += DARK_HORSE_WEIGHTS["operating_cashflow"]
-
-    final_score = weighted_total / weight_used if weight_used else 50.0
-    if final_score >= 70:
+        pe_vs_sector_score = 0.0
+        value_details["pe_vs_sector"] = {"score": 0.0, "max": 12, "detail": "PE unavailable"}
+    value_score += pe_vs_sector_score
+    
+    # PB ratio → 8 pts
+    if pb is not None:
+        if pb < 2:
+            pb_score = 8.0
+        elif pb > 5:
+            pb_score = 0.0
+        else:
+            pb_score = 8.0 * ((5 - pb) / 3)
+        pb_score = max(0.0, min(8.0, pb_score))
+        value_details["pb_ratio"] = {"score": pb_score, "max": 8, "detail": f"PB {pb:.2f}"}
+    else:
+        pb_score = 0.0
+        value_details["pb_ratio"] = {"score": 0.0, "max": 8, "detail": "PB unavailable"}
+    value_score += pb_score
+    
+    # Price vs 200 DMA → 8 pts
+    if dma_200 and current_price:
+        price_vs_200dma_pct = ((dma_200 - current_price) / dma_200) * 100
+        if price_vs_200dma_pct >= 10:
+            price_vs_200dma_score = 8.0
+        elif price_vs_200dma_pct <= 0:
+            price_vs_200dma_score = 0.0
+        else:
+            price_vs_200dma_score = (price_vs_200dma_pct / 10) * 8
+        price_vs_200dma_score = max(0.0, min(8.0, price_vs_200dma_score))
+        value_details["price_vs_200dma"] = {"score": price_vs_200dma_score, "max": 8, "detail": f"Price {price_vs_200dma_pct:+.1f}% vs 200DMA"}
+    else:
+        price_vs_200dma_score = 0.0
+        value_details["price_vs_200dma"] = {"score": 0.0, "max": 8, "detail": "200DMA unavailable"}
+    value_score += price_vs_200dma_score
+    
+    # Price vs 52-week high → 15 pts (increased from 7 to penalize stocks near highs more heavily)
+    if week_52_high and current_price:
+        price_vs_52w_high_pct = ((week_52_high - current_price) / week_52_high) * 100
+        if price_vs_52w_high_pct >= 30:
+            price_vs_52w_high_score = 15.0
+        elif price_vs_52w_high_pct <= 5:
+            price_vs_52w_high_score = 0.0
+        else:
+            price_vs_52w_high_score = ((price_vs_52w_high_pct - 5) / 25) * 15
+        price_vs_52w_high_score = max(0.0, min(15.0, price_vs_52w_high_score))
+        value_details["price_vs_52w_high"] = {"score": price_vs_52w_high_score, "max": 15, "detail": f"Price {price_vs_52w_high_pct:+.1f}% vs 52w high"}
+    else:
+        price_vs_52w_high_score = 0.0
+        value_details["price_vs_52w_high"] = {"score": 0.0, "max": 15, "detail": "52w high unavailable"}
+    value_score += price_vs_52w_high_score
+    
+    # CATEGORY 2 — FUNDAMENTALS (40 pts total)
+    fundamentals_score = 0.0
+    fundamentals_details = {}
+    
+    # ROE → 15 pts
+    if roe is not None:
+        if roe > 25:
+            roe_score = 15.0
+        elif roe >= 15:
+            roe_score = 10.0
+        elif roe >= 10:
+            roe_score = 5.0
+        else:
+            roe_score = 0.0
+        fundamentals_details["roe"] = {"score": roe_score, "max": 15, "detail": f"ROE {roe:.1f}%"}
+    else:
+        roe_score = 0.0
+        fundamentals_details["roe"] = {"score": 0.0, "max": 15, "detail": "ROE unavailable"}
+    fundamentals_score += roe_score
+    
+    # ROCE → 10 pts
+    if roce is not None:
+        if roce > 20:
+            roce_score = 10.0
+        elif roce >= 15:
+            roce_score = 7.0
+        elif roce >= 10:
+            roce_score = 4.0
+        else:
+            roce_score = 0.0
+        fundamentals_details["roce"] = {"score": roce_score, "max": 10, "detail": f"ROCE {roce:.1f}%"}
+    else:
+        roce_score = 0.0
+        fundamentals_details["roce"] = {"score": 0.0, "max": 10, "detail": "ROCE unavailable"}
+    fundamentals_score += roce_score
+    
+    # OCF Score → 10 pts (normalize from 25 to 10)
+    ocf_raw_score = 0.0
+    if ocf and mcap and mcap > 0:
+        ocf_yield = ocf / mcap
+        ocf_ratio_score = max(0.0, min(5.0, ocf_yield * 100))
+        ocf_raw_score += ocf_ratio_score * 5  # Scale to 25
+    if ocf and ocf > 0:
+        ocf_raw_score += 10  # Positive OCF bonus
+    if ocf and mcap and mcap > 0:
+        net_income = _safe_float(info.get("netIncomeToCommon"))
+        if net_income and ocf > net_income:
+            ocf_raw_score += 10  # OCF > net income bonus
+    ocf_normalized_score = (ocf_raw_score / 25) * 10 if ocf_raw_score > 0 else 0.0
+    ocf_normalized_score = max(0.0, min(10.0, ocf_normalized_score))
+    fundamentals_details["ocf"] = {"score": ocf_normalized_score, "max": 10, "detail": f"OCF yield {(ocf/mcap*100 if ocf and mcap else 0):.2f}%"}
+    fundamentals_score += ocf_normalized_score
+    
+    # Debt/Equity → 5 pts
+    if debt_to_equity is not None:
+        if debt_to_equity < 0.5:
+            de_score = 5.0
+        elif debt_to_equity <= 1.0:
+            de_score = 3.0
+        elif debt_to_equity <= 2.0:
+            de_score = 1.0
+        else:
+            de_score = 0.0
+        fundamentals_details["debt_to_equity"] = {"score": de_score, "max": 5, "detail": f"D/E {debt_to_equity:.2f}"}
+    else:
+        de_score = 0.0
+        fundamentals_details["debt_to_equity"] = {"score": 0.0, "max": 5, "detail": "D/E unavailable"}
+    fundamentals_score += de_score
+    
+    # CATEGORY 3 — MOMENTUM (15 pts total)
+    momentum_score = 0.0
+    momentum_details = {}
+    
+    # Price vs 50 DMA → 8 pts
+    if dma_50 and current_price:
+        if current_price > dma_50:
+            price_vs_50dma_score = 8.0
+        else:
+            price_vs_50dma_score = 0.0
+        momentum_details["price_vs_50dma"] = {"score": price_vs_50dma_score, "max": 8, "detail": f"Price {'above' if current_price > dma_50 else 'below'} 50DMA"}
+    else:
+        price_vs_50dma_score = 0.0
+        momentum_details["price_vs_50dma"] = {"score": 0.0, "max": 8, "detail": "50DMA unavailable"}
+    momentum_score += price_vs_50dma_score
+    
+    # Existing Dark Horse score → 7 pts (use fundamentals as proxy)
+    # Since we're rebuilding the system, use fundamentals quality as proxy
+    dh_proxy_score = (roe_score / 15) * 3 + (roce_score / 10) * 2 + (price_vs_50dma_score / 8) * 2
+    dh_proxy_score = max(0.0, min(7.0, dh_proxy_score))
+    momentum_details["dark_horse_proxy"] = {"score": dh_proxy_score, "max": 7, "detail": "Quality proxy"}
+    momentum_score += dh_proxy_score
+    
+    # CATEGORY 4 — RISK PENALTY (subtract up to 15 pts - increased from 10)
+    risk_penalty = 0.0
+    risk_flags = []
+    
+    # Trading within 5% of 52-week high → subtract 8 pts (major penalty for overvalued stocks)
+    if week_52_high and current_price:
+        price_vs_52w_high_pct = ((week_52_high - current_price) / week_52_high) * 100
+        if price_vs_52w_high_pct <= 5:
+            risk_penalty -= 8.0
+            risk_flags.append(f"Trading near 52w high ({price_vs_52w_high_pct:+.1f}% from high)")
+    
+    # D/E > 2.0 → subtract 5 pts
+    if debt_to_equity and debt_to_equity > 2.0:
+        risk_penalty -= 5.0
+        risk_flags.append("High D/E (>2.0)")
+    
+    # PE > 30 → subtract 3 pts
+    if pe and pe > 30:
+        risk_penalty -= 3.0
+        risk_flags.append("High PE (>30)")
+    
+    # ROCE < 10% → subtract 2 pts
+    if roce and roce < 10:
+        risk_penalty -= 2.0
+        risk_flags.append("Low ROCE (<10%)")
+    
+    risk_penalty = max(-15.0, risk_penalty)  # Cap at -15
+    
+    # Total score
+    total_score = value_score + fundamentals_score + momentum_score + risk_penalty
+    total_score = max(0.0, min(100.0, total_score))
+    
+    # Determine tier
+    if total_score >= 75:
         tier = "green"
-    elif final_score >= 45:
+    elif total_score >= 50:
         tier = "amber"
     else:
         tier = "red"
-
-    breakdown_lines = [
-        f"FCF yield (20%): {components['fcf_yield']['score']:.0f}/100 — {components['fcf_yield']['detail']}",
-        f"Revenue growth (15%): {components['revenue_cagr']['score']:.0f}/100 — {components['revenue_cagr']['detail']}",
-        f"Analyst coverage ↓ (10%): {components['analyst_inverse']['score']:.0f}/100 — {components['analyst_inverse']['detail']}",
-        f"Institutional own. ↓ (10%): {components['inst_inverse']['score']:.0f}/100 — {components['inst_inverse']['detail']}",
-        f"Insider buy/sell (10%): {components['insider_ratio']['score']:.0f}/100 — {components['insider_ratio']['detail']}",
-        f"Gross margin trend (10%): {components['gm_trend']['score']:.0f}/100 — {components['gm_trend']['detail']}",
-        f"P/E ratio (15%): {components['pe_ratio']['score']:.0f}/100 — {components['pe_ratio']['detail']}",
-        f"Operating cash flow (10%): {components['operating_cashflow']['score']:.0f}/100 — {components['operating_cashflow']['detail']}",
-    ]
-
+    
     return {
-        "score": round(final_score, 1),
+        "score": round(total_score, 1),
         "tier": tier,
-        "components": components,
-        "breakdown_lines": breakdown_lines,
+        "value_score": round(value_score, 1),
+        "fundamentals_score": round(fundamentals_score, 1),
+        "momentum_score": round(momentum_score, 1),
+        "risk_penalty": round(risk_penalty, 1),
+        "value_details": value_details,
+        "fundamentals_details": fundamentals_details,
+        "momentum_details": momentum_details,
+        "risk_flags": risk_flags,
     }
 
 
@@ -1359,6 +1803,46 @@ def render_conviction_tier_board(tiers: dict[str, list[str]]) -> None:
                         )
                     st.rerun()
 
+    # Tier 3 — Thesis & sizing section
+    tier3_symbols = tiers.get("3", [])
+    if tier3_symbols:
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("**Tier 3 — Thesis & sizing**")
+        for sym in tier3_symbols:
+            label = sym.removesuffix(NSE_SUFFIX)
+            meta = get_conviction_meta(sym)
+            with st.sidebar.container():
+                st.sidebar.markdown(f"**{label}**")
+                thesis = st.sidebar.text_area(
+                    "Investment thesis",
+                    value=meta.get("thesis", ""),
+                    key=f"conv_thesis_{sym}",
+                    height=100,
+                )
+                if thesis != meta.get("thesis", ""):
+                    meta["thesis"] = thesis
+                    _save_conviction_to_disk()
+                
+                # Allocation percentage for Tier 3
+                alloc_col1, alloc_col2 = st.sidebar.columns(2)
+                with alloc_col1:
+                    alloc_pct = st.sidebar.number_input(
+                        "Allocation %",
+                        min_value=0.0,
+                        max_value=8.0,
+                        step=0.5,
+                        value=float(meta.get("allocation_pct") or 0.0),
+                        key=f"conv_alloc_{sym}",
+                        label_visibility="collapsed",
+                    )
+                with alloc_col2:
+                    if st.sidebar.button("Save", key=f"conv_save_alloc_{sym}", use_container_width=True):
+                        meta["allocation_pct"] = alloc_pct
+                        _save_conviction_to_disk()
+                        st.sidebar.success("Allocation saved")
+                        st.rerun()
+            st.sidebar.markdown("---")
+
 
 # Sector stock lists for top stocks display
 SECTOR_STOCKS = {
@@ -1380,9 +1864,9 @@ SECTOR_STOCKS = {
 }
 
 
-@st.cache_data(ttl=604800)  # Cache for 7 days (1 week)
+@st.cache_data(ttl=60)  # Cache for 1 minute to ensure fresh prices on refresh
 def fetch_sector_stocks_data() -> dict:
-    """Fetch and cache sector stocks data for 1 week."""
+    """Fetch and cache sector stocks data for 1 minute."""
     sector_data_dict = {}
     for sector, stocks in SECTOR_STOCKS.items():
         sector_data = []
@@ -1461,15 +1945,22 @@ def render_dark_horse_badge(data: dict) -> None:
 
     score = dh["score"]
     tier = dh.get("tier", "amber")
-    tooltip_html = "<br/>".join(dh.get("breakdown_lines", []))
+    
+    # Color coding: 75-100 green, 50-74 amber, below 50 red
+    if score >= 75:
+        color_class = "dh-green"
+        label = "Strong Buy"
+    elif score >= 50:
+        color_class = "dh-amber"
+        label = "Watch"
+    else:
+        color_class = "dh-red"
+        label = "Avoid"
+    
     st.markdown(
         f"""
         <div class="dh-wrap">
-            <span class="dh-badge dh-{tier}">Dark Horse {score:.0f}</span>
-            <div class="dh-tooltip">
-                <strong>Score breakdown (0–100)</strong><br/>
-                {tooltip_html}
-            </div>
+            <span class="dh-badge {color_class}">Dark Horse {score:.0f}/100 ({label})</span>
         </div>
         """,
         unsafe_allow_html=True,
@@ -2738,6 +3229,52 @@ def render_stock_view(data: dict) -> None:
     )
     st.dataframe(fundamentals, use_container_width=True, hide_index=True)
 
+    # Dark Horse Score Breakdown
+    dh = data.get("dark_horse")
+    if dh and dh.get("score") is not None:
+        render_section_header("Dark Horse Score Breakdown")
+        
+        # Risk Flags
+        if dh.get("risk_flags"):
+            st.markdown("**Risk Flags**")
+            for flag in dh["risk_flags"]:
+                st.markdown(f'<span style="color: #ef4444;">⚠️ {flag}</span>', unsafe_allow_html=True)
+        
+        # Category progress bars
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**Value (43 pts)**")
+            for key, detail in dh.get("value_details", {}).items():
+                score_pct = (detail["score"] / detail["max"]) * 100
+                st.markdown(f"{detail['detail']}: {detail['score']:.1f}/{detail['max']}")
+                st.progress(score_pct / 100)
+            
+            st.markdown("**Fundamentals (40 pts)**")
+            for key, detail in dh.get("fundamentals_details", {}).items():
+                score_pct = (detail["score"] / detail["max"]) * 100
+                st.markdown(f"{detail['detail']}: {detail['score']:.1f}/{detail['max']}")
+                st.progress(score_pct / 100)
+        
+        with col2:
+            st.markdown("**Momentum (15 pts)**")
+            for key, detail in dh.get("momentum_details", {}).items():
+                score_pct = (detail["score"] / detail["max"]) * 100
+                st.markdown(f"{detail['detail']}: {detail['score']:.1f}/{detail['max']}")
+                st.progress(score_pct / 100)
+            
+            st.markdown("**Risk Penalty**")
+            risk_penalty = dh.get("risk_penalty", 0)
+            if risk_penalty < 0:
+                st.markdown(f"Penalty: {risk_penalty:.1f} pts")
+                st.markdown(f'<span style="color: #ef4444;">{dh.get("risk_flags", [])}</span>', unsafe_allow_html=True)
+            else:
+                st.markdown("No penalties")
+        
+        # Summary
+        st.markdown(f"**Total Score: {dh['score']:.1f}/100**")
+        st.markdown(f"Value: {dh.get('value_score', 0):.1f} | Fundamentals: {dh.get('fundamentals_score', 0):.1f} | Momentum: {dh.get('momentum_score', 0):.1f} | Risk: {dh.get('risk_penalty', 0):.1f}")
+
     render_section_header("News intelligence", "Synthesized headline tone — not financial advice.")
     news_items = data.get("news") or []
     stock_label = data.get("name") or data.get("symbol", "")
@@ -2957,7 +3494,7 @@ if compare_on:
     else:
         st.session_state["compare_symbol"] = ""
 
-tab_research, tab_portfolio_health, tab_holdings, tab_scanner = st.tabs(["Research", "Portfolio Health", "Current Holdings", "Dark Horse Scanner"])
+tab_research, tab_portfolio_health, tab_holdings, tab_scanner, tab_mutual_funds = st.tabs(["Research", "Portfolio Health", "Current Holdings", "Dark Horse Scanner", "Mutual Funds"])
 
 selected = st.session_state.get("selected_symbol")
 compare_symbol = st.session_state.get("compare_symbol", "")
@@ -3140,6 +3677,10 @@ with tab_scanner:
         scan_btn = st.button("Run Scanner", use_container_width=True)
 
     if scan_btn:
+        # Clear old scanner results to force re-display with updated format
+        if "scanner_results" in st.session_state:
+            del st.session_state["scanner_results"]
+        
         # Fetch Nifty 500 stocks
         try:
             url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
@@ -3207,6 +3748,7 @@ with tab_scanner:
                     pass
 
                 current_price = data.get("current_price")
+                week_52_high = data.get("week_52_high")
 
                 # Skip if essential data is missing
                 if pe is None or pb is None or roe is None or current_price is None:
@@ -3218,316 +3760,156 @@ with tab_scanner:
                 continue
 
             try:
-                # Calculate dark horse score with new exact weighting system
-                value_score = 0
-                fundamentals_score = 0
-                momentum_score = 0
-                risk_penalty = 0
+                # Use the new compute_dark_horse_score function
+                ticker = yf.Ticker(sym)
+                dark_horse_result = compute_dark_horse_score(sym, info, ticker)
+                total_score = dark_horse_result["score"]
+                risk_flags = dark_horse_result.get("risk_flags", [])
+            except Exception as e:
+                st.warning(f"Error computing dark horse score for {sym}: {e}. Using default score.")
+                total_score = 50.0
                 risk_flags = []
 
-                # CATEGORY 1 — VALUE (35 pts total)
-                # PE ratio vs sector median → 12 pts. Score = 12 if PE is 20%+ below sector median, scale down to 0 if at or above median
-                sector_median_pe = 20  # Simplified sector median (could be made sector-specific)
-                if pe:
-                    pe_discount_pct = ((sector_median_pe - pe) / sector_median_pe) * 100
-                    if pe_discount_pct >= 20:
-                        pe_vs_sector_score = 12
-                    elif pe_discount_pct <= 0:
-                        pe_vs_sector_score = 0
-                    else:
-                        pe_vs_sector_score = (pe_discount_pct / 20) * 12
-                    pe_vs_sector_score = max(0, min(12, pe_vs_sector_score))
-                else:
-                    pe_vs_sector_score = 0
-                value_score += pe_vs_sector_score
+            # Entry/Exit point evaluation
+            entry_point = None
+            exit_point = None
+            entry_signal = "HOLD"
+            forecast_50w = None
 
-                # PB ratio → 8 pts. Score = 8 if PB < 2, scale to 0 at PB > 5
-                if pb:
-                    if pb < 2:
-                        pb_score = 8
-                    elif pb > 5:
-                        pb_score = 0
-                    else:
-                        pb_score = 8 * ((5 - pb) / 3)
-                    pb_score = max(0, min(8, pb_score))
-                else:
-                    pb_score = 0
-                value_score += pb_score
+            # Get 2-week historical data for entry analysis
+            hist_2w = None
+            try:
+                hist_2w = yf.Ticker(sym).history(period="5d")  # Use 5d instead of 2w (yfinance doesn't support 2w)
+            except:
+                pass
 
-                # Price vs 200 DMA → 8 pts. Score = 8 if price is 10%+ below 200DMA, 0 if above
-                if dma_200 and current_price:
-                    price_vs_200dma_pct = ((dma_200 - current_price) / dma_200) * 100
-                    if price_vs_200dma_pct >= 10:
-                        price_vs_200dma_score = 8
-                    elif price_vs_200dma_pct <= 0:
-                        price_vs_200dma_score = 0
-                    else:
-                        price_vs_200dma_score = (price_vs_200dma_pct / 10) * 8
-                    price_vs_200dma_score = max(0, min(8, price_vs_200dma_score))
-                else:
-                    price_vs_200dma_score = 0
-                value_score += price_vs_200dma_score
+            if dma_50 and dma_200 and current_price:
+                # Entry point analysis using 2-week data
+                if hist_2w is not None and len(hist_2w) > 0:
+                    recent_low = hist_2w['Low'].min()
+                    recent_high = hist_2w['High'].max()
+                    recent_trend = (current_price - hist_2w['Close'].iloc[0]) / hist_2w['Close'].iloc[0] * 100
 
-                # Price vs 52-week high → 7 pts. Score = 7 if price is 30%+ below 52w high, scale to 0 if within 5%
-                week_52_high = data.get("week_52_high")
-                if week_52_high and current_price:
-                    price_vs_52w_high_pct = ((week_52_high - current_price) / week_52_high) * 100
-                    if price_vs_52w_high_pct >= 30:
-                        price_vs_52w_high_score = 7
-                    elif price_vs_52w_high_pct <= 5:
-                        price_vs_52w_high_score = 0
-                    else:
-                        price_vs_52w_high_score = ((price_vs_52w_high_pct - 5) / 25) * 7
-                    price_vs_52w_high_score = max(0, min(7, price_vs_52w_high_score))
-                else:
-                    price_vs_52w_high_score = 0
-                value_score += price_vs_52w_high_score
-
-                # CATEGORY 2 — FUNDAMENTALS (40 pts total)
-                # ROE → 15 pts. Score = 15 if ROE > 25%, 10 if ROE 15–25%, 5 if ROE 10–15%, 0 if below 10%
-                if roe:
-                    if roe > 25:
-                        roe_score = 15
-                    elif roe >= 15:
-                        roe_score = 10
-                    elif roe >= 10:
-                        roe_score = 5
-                    else:
-                        roe_score = 0
-                else:
-                    roe_score = 0
-                fundamentals_score += roe_score
-
-                # ROCE → 10 pts. Score = 10 if ROCE > 20%, 7 if 15–20%, 4 if 10–15%, 0 if below 10%
-                if roce:
-                    if roce > 20:
-                        roce_score = 10
-                    elif roce >= 15:
-                        roce_score = 7
-                    elif roce >= 10:
-                        roce_score = 4
-                    else:
-                        roce_score = 0
-                else:
-                    roce_score = 0
-                fundamentals_score += roce_score
-
-                # OCF Score → 10 pts. Pass through directly if already scored out of 25 — normalize to 10 pts
-                # Use the existing ocf_score calculation (out of 25) and normalize to 10
-                operating_cash_flow = _safe_float(info.get("operatingCashflow"))
-                net_income = _safe_float(info.get("netIncomeToCommon"))
-                revenue = _safe_float(info.get("totalRevenue"))
-                ocf_raw_score = 0
-                if operating_cash_flow and net_income:
-                    ocf_vs_profit = 10 if operating_cash_flow > net_income else 5
-                    ocf_raw_score += ocf_vs_profit
-                if revenue:
-                    ocf_ratio = operating_cash_flow / revenue
-                    ocf_ratio_score = max(0, min(5, ocf_ratio * 100))
-                    ocf_raw_score += ocf_ratio_score
-                ocf_positive = 10 if operating_cash_flow > 0 else 0
-                ocf_raw_score += ocf_positive
-                # Normalize from 25 to 10
-                ocf_normalized_score = (ocf_raw_score / 25) * 10
-                ocf_normalized_score = max(0, min(10, ocf_normalized_score))
-                fundamentals_score += ocf_normalized_score
-
-                # Debt/Equity → 5 pts. Score = 5 if D/E < 0.5, 3 if 0.5–1.0, 1 if 1.0–2.0, 0 if above 2.0
-                if debt_to_equity:
-                    if debt_to_equity < 0.5:
-                        de_score = 5
-                    elif debt_to_equity <= 1.0:
-                        de_score = 3
-                    elif debt_to_equity <= 2.0:
-                        de_score = 1
-                    else:
-                        de_score = 0
-                else:
-                    de_score = 0
-                fundamentals_score += de_score
-
-                # CATEGORY 3 — MOMENTUM (15 pts total)
-                # Price vs 50 DMA → 8 pts. Score = 8 if price is above 50 DMA (recovery signal), 0 if below
-                if dma_50 and current_price:
+                    # Determine entry point based on 2-week analysis
                     if current_price > dma_50:
-                        price_vs_50dma_score = 8
+                        # Price above 50 DMA - look for pullback to DMA or recent low
+                        entry_point = min(dma_50, recent_low)
+                        if current_price < dma_50 * 1.02 or current_price < recent_low * 1.03:
+                            entry_signal = "BUY"
+                        elif recent_trend < -5:  # Recent downtrend
+                            entry_signal = "WAIT"
+                    elif current_price > dma_200:
+                        # Price between 50 and 200 DMA
+                        entry_point = min(dma_200, recent_low)
+                        if current_price < dma_200 * 1.02 or current_price < recent_low * 1.03:
+                            entry_signal = "BUY"
+                        elif recent_trend < -10:  # Strong recent downtrend
+                            entry_signal = "WAIT"
                     else:
-                        price_vs_50dma_score = 0
+                        # Price below 200 DMA - current price is the entry point
+                        entry_point = current_price
+                        entry_signal = "BUY"
                 else:
-                    price_vs_50dma_score = 0
-                momentum_score += price_vs_50dma_score
-
-                # Existing Dark Horse score → 7 pts. Normalize current dark horse score to 7 pts
-                # Calculate a simple dark horse score based on momentum and fundamentals
-                dh_base_score = (roe_score / 15) * 3 + (roce_score / 10) * 2 + (price_vs_50dma_score / 8) * 2
-                dh_normalized_score = (dh_base_score / 7) * 7
-                dh_normalized_score = max(0, min(7, dh_normalized_score))
-                momentum_score += dh_normalized_score
-
-                # CATEGORY 4 — RISK PENALTY (subtract up to 10 pts)
-                # D/E > 2.0 → subtract 5 pts
-                if debt_to_equity and debt_to_equity > 2.0:
-                    risk_penalty -= 5
-                    risk_flags.append("High D/E (>2.0)")
-                # PE > 30 → subtract 3 pts
-                if pe and pe > 30:
-                    risk_penalty -= 3
-                    risk_flags.append("High PE (>30)")
-                # ROCE < 10% → subtract 2 pts
-                if roce and roce < 10:
-                    risk_penalty -= 2
-                    risk_flags.append("Low ROCE (<10%)")
-                risk_penalty = max(-10, risk_penalty)  # Cap at -10
-
-                # Total score
-                total_score = value_score + fundamentals_score + momentum_score + risk_penalty
-
-                # Entry/Exit point evaluation
-                entry_point = None
-                exit_point = None
-                entry_signal = "HOLD"
-                forecast_50w = None
-
-                # Get 2-week historical data for entry analysis
-                hist_2w = None
-                try:
-                    hist_2w = yf.Ticker(sym).history(period="2w")
-                except:
-                    pass
-
-                if dma_50 and dma_200 and current_price:
-                    # Entry point analysis using 2-week data
-                    if hist_2w is not None and len(hist_2w) > 0:
-                        recent_low = hist_2w['Low'].min()
-                        recent_high = hist_2w['High'].max()
-                        recent_trend = (current_price - hist_2w['Close'].iloc[0]) / hist_2w['Close'].iloc[0] * 100
-
-                        # Determine entry point based on 2-week analysis
-                        if current_price > dma_50:
-                            # Price above 50 DMA - look for pullback to DMA or recent low
-                            entry_point = min(dma_50, recent_low)
-                            if current_price < dma_50 * 1.02 or current_price < recent_low * 1.03:
-                                entry_signal = "BUY"
-                            elif recent_trend < -5:  # Recent downtrend
-                                entry_signal = "WAIT"
-                        elif current_price > dma_200:
-                            # Price between 50 and 200 DMA
-                            entry_point = min(dma_200, recent_low)
-                            if current_price < dma_200 * 1.02 or current_price < recent_low * 1.03:
-                                entry_signal = "BUY"
-                            elif recent_trend < -10:  # Strong recent downtrend
-                                entry_signal = "WAIT"
-                        else:
-                            # Price below 200 DMA - current price is the entry point
-                            entry_point = current_price
+                    # Fallback to original logic if 2-week data unavailable
+                    if current_price > dma_50:
+                        entry_point = dma_50
+                        if current_price < dma_50 * 1.02:
+                            entry_signal = "BUY"
+                    elif current_price > dma_200:
+                        entry_point = dma_200
+                        if current_price < dma_200 * 1.02:
                             entry_signal = "BUY"
                     else:
-                        # Fallback to original logic if 2-week data unavailable
-                        if current_price > dma_50:
-                            entry_point = dma_50
-                            if current_price < dma_50 * 1.02:
-                                entry_signal = "BUY"
-                        elif current_price > dma_200:
-                            entry_point = dma_200
-                            if current_price < dma_200 * 1.02:
-                                entry_signal = "BUY"
-                        else:
-                            # Price below 200 DMA - current price is the entry point
-                            entry_point = current_price
-                            entry_signal = "BUY"
+                        # Price below 200 DMA - current price is the entry point
+                        entry_point = current_price
+                        entry_signal = "BUY"
 
-                    # 50-week forecast for exit criteria
-                    # Use historical volatility and trend to project 50-week target
-                    try:
-                        hist_1y = yf.Ticker(sym).history(period="1y")
-                        if len(hist_1y) > 50:
-                            # Calculate annualized return and volatility
-                            returns = hist_1y['Close'].pct_change().dropna()
-                            annual_return = (1 + returns.mean()) ** 252 - 1
-                            volatility = returns.std() * (252 ** 0.5)
+                # 50-week forecast for exit criteria
+                # Use historical volatility and trend to project 50-week target
+                try:
+                    hist_1y = yf.Ticker(sym).history(period="1y")
+                    if len(hist_1y) > 50:
+                        # Calculate annualized return and volatility
+                        returns = hist_1y['Close'].pct_change().dropna()
+                        annual_return = (1 + returns.mean()) ** 252 - 1
+                        volatility = returns.std() * (252 ** 0.5)
 
-                            # Conservative forecast: expected return with risk adjustment
-                            expected_50w_return = annual_return * 0.5  # Conservative estimate
-                            risk_adjusted_return = expected_50w_return - (volatility * 0.3)
+                        # Conservative forecast: expected return with risk adjustment
+                        expected_50w_return = annual_return * 0.5  # Conservative estimate
+                        risk_adjusted_return = expected_50w_return - (volatility * 0.3)
 
-                            # Calculate exit point based on forecast
-                            forecast_50w = current_price * (1 + risk_adjusted_return)
+                        # Calculate exit point based on forecast
+                        forecast_50w = current_price * (1 + risk_adjusted_return)
 
-                            # Ensure exit point is reasonable (between 10% and 50% gain)
-                            min_exit = entry_point * 1.10 if entry_point else current_price * 1.10
-                            max_exit = entry_point * 1.50 if entry_point else current_price * 1.50
-                            forecast_50w = max(min_exit, min(max_exit, forecast_50w))
-                        else:
-                            # Fallback if insufficient historical data
-                            forecast_50w = current_price * 1.25  # 25% target
-                    except:
-                        forecast_50w = current_price * 1.25  # Default 25% target
+                        # Ensure exit point is reasonable (between 10% and 50% gain)
+                        min_exit = entry_point * 1.10 if entry_point else current_price * 1.10
+                        max_exit = entry_point * 1.50 if entry_point else current_price * 1.50
+                        forecast_50w = max(min_exit, min(max_exit, forecast_50w))
+                    else:
+                        # Fallback if insufficient historical data
+                        forecast_50w = current_price * 1.25  # 25% target
+                except:
+                    forecast_50w = current_price * 1.25  # Default 25% target
 
-                    # Final exit point: use forecast but cap at 52-week high
-                    exit_point = forecast_50w
-                    if week_52_high:
-                        exit_point = min(exit_point, week_52_high * 0.95)
+                # Final exit point: use forecast but cap at 52-week high
+                exit_point = forecast_50w
+                if week_52_high:
+                    exit_point = min(exit_point, week_52_high * 0.95)
 
-                # Generate reasoning based on new scoring
-                reasons = []
-                if pe and pe < 15:
-                    reasons.append(f"Low PE ({pe:.1f})")
-                if roe and roe > 18:
-                    reasons.append(f"High ROE ({roe:.1f}%)")
-                if roce and roce > 15:
-                    reasons.append(f"High ROCE ({roce:.1f}%)")
-                if debt_to_equity and debt_to_equity < 0.3:
-                    reasons.append(f"Low debt ({debt_to_equity:.2f})")
-                if value_score >= 25:
-                    reasons.append("Strong value metrics")
-                if fundamentals_score >= 30:
-                    reasons.append("Solid fundamentals")
-                if momentum_score >= 10:
-                    reasons.append("Positive momentum")
+            # Generate reasoning based on scoring
+            reasons = []
+            if pe and pe < 15:
+                reasons.append(f"Low PE ({pe:.1f})")
+            if roe and roe > 18:
+                reasons.append(f"High ROE ({roe:.1f}%)")
+            if roce and roce > 15:
+                reasons.append(f"High ROCE ({roce:.1f}%)")
+            if debt_to_equity and debt_to_equity < 0.3:
+                reasons.append(f"Low debt ({debt_to_equity:.2f})")
+            if total_score >= 70:
+                reasons.append("Strong overall score")
+            if total_score >= 50:
+                reasons.append("Good fundamentals")
 
-                reasoning = ", ".join(reasons[:3]) if reasons else "Balanced fundamentals"
+            reasoning = ", ".join(reasons[:3]) if reasons else "Balanced fundamentals"
 
-                # Risk flags
-                risks = []
-                if debt_to_equity and debt_to_equity > 0.4:
-                    risks.append("Moderate debt")
-                if promoter_holding and promoter_holding < 50:
-                    risks.append("Low promoter holding")
-                if pe and pe > 20:
-                    risks.append("High PE")
+            # Risk flags
+            risks = []
+            if debt_to_equity and debt_to_equity > 0.4:
+                risks.append("Moderate debt")
+            if promoter_holding and promoter_holding < 50:
+                risks.append("Low promoter holding")
+            if pe and pe > 20:
+                risks.append("High PE")
 
-                risk_flag = ", ".join(risks) if risks else None
+            risk_flag = ", ".join(risks) if risks else None
 
-                results.append({
-                    "symbol": sym,
-                    "name": data.get("name", sym.removesuffix(NSE_SUFFIX)),
-                    "sector": data.get("sector", "Unknown"),
-                    "score": round(total_score, 1),
-                    "value_score": round(value_score, 1),
-                    "fundamentals_score": round(fundamentals_score, 1),
-                    "momentum_score": round(momentum_score, 1),
-                    "risk_penalty": round(risk_penalty, 1),
-                    "risk_flags": risk_flags,
-                    "ocf_score": round(ocf_normalized_score, 1),
-                    "current_price": current_price,
-                    "pe": pe,
-                    "pb": pb,
-                    "roe": roe,
-                    "roce": roce,
-                    "debt_to_equity": debt_to_equity,
-                    "dma_50": dma_50,
-                    "dma_200": dma_200,
-                    "entry_point": entry_point,
-                    "exit_point": exit_point,
-                    "forecast_50w": forecast_50w,
-                    "entry_signal": entry_signal,
-                    "reasoning": reasoning,
-                    "risk_flag": risk_flag,
-                })
-
-            except Exception as e:
-                skipped += 1
-                continue
+            results.append({
+                "symbol": sym,
+                "name": data.get("name", sym.removesuffix(NSE_SUFFIX)),
+                "sector": data.get("sector", "Unknown"),
+                "score": round(total_score, 1),
+                "value_score": round(dark_horse_result.get("value_score", 0), 1),
+                "fundamentals_score": round(dark_horse_result.get("fundamentals_score", 0), 1),
+                "momentum_score": round(dark_horse_result.get("momentum_score", 0), 1),
+                "risk_penalty": round(dark_horse_result.get("risk_penalty", 0), 1),
+                "risk_flags": risk_flags,
+                "ocf_score": 0,  # Not used in new scoring system
+                "current_price": current_price,
+                "pe": pe,
+                "pb": pb,
+                "roe": roe,
+                "roce": roce,
+                "debt_to_equity": debt_to_equity,
+                "dma_50": dma_50,
+                "dma_200": dma_200,
+                "entry_point": entry_point,
+                "exit_point": exit_point,
+                "forecast_50w": forecast_50w,
+                "entry_signal": entry_signal,
+                "reasoning": reasoning,
+                "risk_flag": risk_flag,
+            })
 
         # Cleanup progress indicators
         progress_bar.empty()
@@ -3586,18 +3968,22 @@ with tab_scanner:
         st.markdown("### Dark Horse Candidates")
 
         # Filter controls
-        filter_col1, filter_col2, filter_col3 = st.columns(3)
+        filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
         with filter_col1:
             sector_filter = st.selectbox("Filter by Sector", ["All"] + list(set(r["sector"] for r in results)))
         with filter_col2:
-            sort_by = st.selectbox("Sort by", ["Upside Potential", "Score", "OCF Score", "PE", "ROE", "Price"])
+            signal_filter = st.selectbox("Filter by Signal", ["BUY", "HOLD", "All"], index=0)
         with filter_col3:
+            sort_by = st.selectbox("Sort by", ["Upside Potential", "Score", "OCF Score", "PE", "ROE", "Price"])
+        with filter_col4:
             sort_order = st.selectbox("Sort Order", ["Descending", "Ascending"])
 
         # Apply filters
         filtered_results = results
         if sector_filter != "All":
             filtered_results = [r for r in results if r["sector"] == sector_filter]
+        if signal_filter != "All":
+            filtered_results = [r for r in filtered_results if r.get("entry_signal") == signal_filter]
 
         # Sort
         reverse = sort_order == "Descending"
@@ -3839,6 +4225,379 @@ with tab_scanner:
 
     else:
         st.info("Click 'Run Scanner' to start screening stocks.")
+
+with tab_mutual_funds:
+    render_section_header(
+        "Mutual Fund Tracker",
+        "Search funds, track your portfolio, and get investment insights powered by live NAV data."
+    )
+    
+    # Initialize session state for MF portfolio
+    if "mf_portfolio" not in st.session_state:
+        st.session_state["mf_portfolio"] = _load_mf_portfolio_from_disk() or _default_mf_portfolio()
+    if "mf_last_refresh" not in st.session_state:
+        st.session_state["mf_last_refresh"] = None
+    
+    # SECTION 1 — Live MF Holdings Lookup
+    with st.expander("🔍 Live MF Holdings Lookup", expanded=True):
+        st.markdown("Search and analyze mutual funds with live NAV data.")
+        
+        search_query = st.text_input(
+            "Search Mutual Funds",
+            placeholder="e.g., Parag Parikh Flexi Cap, Axis Bluechip",
+            key="mf_search_input"
+        )
+        
+        if search_query and len(search_query.strip()) >= 2:
+            with st.spinner("Searching funds..."):
+                search_results = search_mutual_funds(search_query)
+            
+            if search_results:
+                # Display search results
+                fund_options = [f"{r['schemeName']} ({r['schemeCode']})" for r in search_results[:10]]
+                selected_fund = st.selectbox("Select a fund", fund_options, key="mf_fund_select")
+                
+                if selected_fund:
+                    # Extract scheme code and fund name from selected string
+                    scheme_code = selected_fund.split("(")[-1].rstrip(")")
+                    fund_name = selected_fund.split("(")[0].strip()
+                    
+                    # Fetch scheme details to get fund house and category
+                    scheme_details = get_scheme_details(scheme_code)
+                    if scheme_details:
+                        fund_house = scheme_details.get('fund_house', 'N/A')
+                        scheme_category = scheme_details.get('scheme_category', 'N/A')
+                    else:
+                        fund_house = 'N/A'
+                        scheme_category = 'N/A'
+                    
+                    # Show basic fund info immediately
+                    st.markdown(f"### {fund_name}")
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("Fund House", fund_house)
+                    col2.metric("Category", scheme_category)
+                    col3.metric("Scheme Code", scheme_code)
+                    
+                    # Add to portfolio button - always visible
+                    if st.button(f"Add {fund_name} to My Portfolio", key=f"add_mf_{scheme_code}", use_container_width=True):
+                        new_fund = {
+                            "scheme_code": scheme_code,
+                            "scheme_name": fund_name,
+                            "units": 0.0,
+                            "avg_nav": 0.0,
+                            "investment_type": "Lump sum",
+                            "status": "Continue",
+                            "notes": ""
+                        }
+                        st.session_state["mf_portfolio"].append(new_fund)
+                        _save_mf_portfolio_to_disk(st.session_state["mf_portfolio"])
+                        st.success(f"Added {fund_name} to portfolio")
+                        st.rerun()
+                    
+                    # Fetch detailed data
+                    with st.spinner("Loading fund data..."):
+                        # Fetch latest NAV
+                        latest_nav_data = get_latest_nav(scheme_code)
+                        # Fetch historical NAV for returns
+                        historical_nav_data = get_historical_nav(scheme_code)
+                        # Fetch holdings
+                        holdings_data = get_fund_holdings(scheme_code)
+                        
+                        # Calculate returns
+                        returns_data = calculate_returns(historical_nav_data)
+                    
+                    if latest_nav_data:
+                        # Live NAV with date
+                        nav = float(latest_nav_data.get('nav', 0))
+                        nav_date = latest_nav_data.get('date', 'N/A')
+                        st.metric(f"Live NAV · ₹{nav:.2f}", nav_date)
+                        
+                        # Returns
+                        st.markdown("#### Returns (CAGR)")
+                        ret_col1, ret_col2, ret_col3 = st.columns(3)
+                        ret_col1.metric("1Y Return", f"{returns_data['1Y']:.2f}%" if returns_data['1Y'] else "N/A")
+                        ret_col2.metric("3Y Return", f"{returns_data['3Y']:.2f}%" if returns_data['3Y'] else "N/A")
+                        ret_col3.metric("5Y Return", f"{returns_data['5Y']:.2f}%" if returns_data['5Y'] else "N/A")
+                        
+                        # Holdings
+                        if holdings_data and holdings_data.get('status') in ['success', 'cached', 'cached_fallback']:
+                            # Display status badge
+                            status = holdings_data.get('status')
+                            cache_age_days = holdings_data.get('cache_age_days', 0)
+                            
+                            if status == 'success':
+                                badge = "🟢 Live"
+                            elif status == 'cached':
+                                badge = f"🟡 Cached ({cache_age_days} days old)"
+                            else:  # cached_fallback
+                                badge = f"🟡 Cached Fallback ({cache_age_days} days old)"
+                            
+                            st.markdown(f"#### Top 5 Holdings · {badge}")
+                            
+                            # Extract holdings data
+                            data = holdings_data.get('data', {})
+                            holdings_list = data.get('holdings', []) if isinstance(data, dict) else []
+                            
+                            if holdings_list:
+                                top_holdings = holdings_list[:5]
+                                
+                                holdings_table = []
+                                for h in top_holdings:
+                                    holdings_table.append({
+                                        "Stock": h.get('stock', 'N/A'),
+                                        "Sector": h.get('sector', 'N/A'),
+                                        "% Allocation": f"{h.get('percentage', 0):.1f}%"
+                                    })
+                                
+                                holdings_df = pd.DataFrame(holdings_table)
+                                st.dataframe(holdings_df, use_container_width=True, hide_index=True)
+                                
+                                # Horizontal bar chart
+                                holdings_chart_data = pd.DataFrame([
+                                    {"Stock": h.get('stock', 'N/A'), "%": h.get('percentage', 0)}
+                                    for h in top_holdings
+                                ])
+                                
+                                holdings_fig = px.bar(
+                                    holdings_chart_data,
+                                    x="%",
+                                    y="Stock",
+                                    orientation='h',
+                                    title="Top 5 Holdings by % Allocation",
+                                    color="%",
+                                    color_continuous_scale="RdYlGn"
+                                )
+                                apply_chart_theme(holdings_fig, height=300)
+                                st.plotly_chart(holdings_fig, use_container_width=True)
+                            else:
+                                st.info("Holdings data structure not recognized")
+                        elif holdings_data and holdings_data.get('status') == 'unavailable':
+                            st.info("⏳ Will sync automatically once mfdata.in is reachable")
+                        else:
+                            st.info("Holdings data unavailable for this fund")
+                    else:
+                        st.warning("Unable to load live NAV data. The fund details may not be available at this time.")
+            else:
+                st.info("No funds found. Try a different search term.")
+    
+    # SECTION 2 — My MF Portfolio Tracker
+    with st.expander("💼 My Mutual Funds Portfolio", expanded=True):
+        st.markdown("Track your mutual fund investments with live NAV updates.")
+        
+        if st.session_state["mf_portfolio"]:
+            # Auto-refresh holdings data if cache is old (background check)
+            for fund in st.session_state["mf_portfolio"]:
+                scheme_code = fund["scheme_code"]
+                cached_data = _load_holdings_from_cache(scheme_code)
+                if cached_data:
+                    cache_date = datetime.fromisoformat(cached_data.get('cached_at', ''))
+                    if datetime.now() - cache_date >= timedelta(days=7):
+                        # Cache is old, try to refresh silently
+                        try:
+                            get_fund_holdings(scheme_code, force_refresh=True)
+                        except Exception:
+                            pass  # Silent fail, will use cached data
+            
+            # Refresh button
+            col_refresh, col_holdings_refresh = st.columns(2)
+            with col_refresh:
+                refresh_btn = st.button("🔄 Refresh Live NAV", key="mf_refresh_nav")
+            with col_holdings_refresh:
+                holdings_refresh_btn = st.button("🔄 Refresh Holdings", key="mf_refresh_holdings")
+            
+            if refresh_btn:
+                with st.spinner("Refreshing NAV data..."):
+                    for fund in st.session_state["mf_portfolio"]:
+                        scheme_code = fund["scheme_code"]
+                        latest_nav_data = get_latest_nav(scheme_code)
+                        if latest_nav_data:
+                            fund["live_nav"] = float(latest_nav_data.get('nav', 0))
+                            fund["nav_date"] = latest_nav_data.get('date', 'N/A')
+                        else:
+                            fund["live_nav"] = None
+                            fund["nav_date"] = None
+                    st.session_state["mf_last_refresh"] = datetime.now().strftime("%d %b %Y, %I:%M %p")
+                    _save_mf_portfolio_to_disk(st.session_state["mf_portfolio"])
+                    st.success("NAV data refreshed")
+                    st.rerun()
+            
+            if holdings_refresh_btn:
+                with st.spinner("Refreshing holdings data..."):
+                    for fund in st.session_state["mf_portfolio"]:
+                        scheme_code = fund["scheme_code"]
+                        get_fund_holdings(scheme_code, force_refresh=True)
+                    st.success("Holdings data refresh attempted")
+                    st.rerun()
+            
+            # Summary card
+            st.markdown("### Portfolio Summary")
+            total_invested = 0.0
+            total_current_value = 0.0
+            
+            for fund in st.session_state["mf_portfolio"]:
+                units = fund.get("units", 0)
+                avg_nav = fund.get("avg_nav", 0)
+                live_nav = fund.get("live_nav")
+                
+                invested = units * avg_nav
+                current_value = units * live_nav if live_nav else 0
+                
+                total_invested += invested
+                total_current_value += current_value
+            
+            total_profit_loss = total_current_value - total_invested
+            total_profit_loss_pct = (total_profit_loss / total_invested * 100) if total_invested > 0 else 0
+            
+            sum_col1, sum_col2, sum_col3, sum_col4 = st.columns(4)
+            sum_col1.metric("Total Invested", f"₹{total_invested:.2f}")
+            sum_col2.metric("Current Value", f"₹{total_current_value:.2f}")
+            sum_col3.metric(
+                "Profit/Loss",
+                f"₹{total_profit_loss:.2f}",
+                delta=f"{total_profit_loss_pct:+.2f}%"
+            )
+            sum_col4.caption(f"Last refresh: {st.session_state['mf_last_refresh'] or 'Never'}")
+            
+            # Portfolio table
+            st.markdown("### Your Holdings")
+            
+            for idx, fund in enumerate(st.session_state["mf_portfolio"]):
+                with st.expander(f"{fund['scheme_name']}", expanded=False):
+                    col1, col2, col3, col4, col5 = st.columns(5)
+                    
+                    with col1:
+                        units = st.number_input(
+                            "Units",
+                            min_value=0.0,
+                            step=1.0,
+                            value=fund.get("units", 0),
+                            key=f"mf_units_{idx}"
+                        )
+                    with col2:
+                        avg_nav = st.number_input(
+                            "Avg Buy NAV",
+                            min_value=0.0,
+                            step=0.01,
+                            value=fund.get("avg_nav", 0),
+                            key=f"mf_avg_nav_{idx}"
+                        )
+                    with col3:
+                        investment_type = st.selectbox(
+                            "Type",
+                            ["Lump sum", "SIP"],
+                            index=0 if fund.get("investment_type") == "Lump sum" else 1,
+                            key=f"mf_type_{idx}"
+                        )
+                    with col4:
+                        status = st.selectbox(
+                            "Status",
+                            ["Continue", "Increase SIP", "Reduce", "Exit"],
+                            index=["Continue", "Increase SIP", "Reduce", "Exit"].index(fund.get("status", "Continue")),
+                            key=f"mf_status_{idx}"
+                        )
+                    with col5:
+                        if st.button("Save", key=f"mf_save_{idx}"):
+                            fund["units"] = units
+                            fund["avg_nav"] = avg_nav
+                            fund["investment_type"] = investment_type
+                            fund["status"] = status
+                            _save_mf_portfolio_to_disk(st.session_state["mf_portfolio"])
+                            st.success("Updated")
+                            st.rerun()
+                    
+                    # Notes
+                    notes = st.text_area(
+                        "Notes",
+                        value=fund.get("notes", ""),
+                        key=f"mf_notes_{idx}",
+                        height=60
+                    )
+                    fund["notes"] = notes
+                    _save_mf_portfolio_to_disk(st.session_state["mf_portfolio"])
+                    
+                    # Calculate and display P&L
+                    live_nav = fund.get("live_nav")
+                    if live_nav and units > 0:
+                        current_value = units * live_nav
+                        invested = units * avg_nav
+                        profit_loss = current_value - invested
+                        profit_loss_pct = (profit_loss / invested * 100) if invested > 0 else 0
+                        
+                        pl_color = "green" if profit_loss >= 0 else "red"
+                        st.markdown(
+                            f"**Current Value:** ₹{current_value:.2f} | "
+                            f"**P&L:** <span style='color:{pl_color}'>₹{profit_loss:.2f} ({profit_loss_pct:+.2f}%)</span>",
+                            unsafe_allow_html=True
+                        )
+                    else:
+                        st.info("Live NAV not available. Refresh to see current value.")
+                    
+                    # Remove button
+                    if st.button(f"Remove {fund['scheme_name']}", key=f"mf_remove_{idx}"):
+                        st.session_state["mf_portfolio"].pop(idx)
+                        _save_mf_portfolio_to_disk(st.session_state["mf_portfolio"])
+                        st.success("Removed from portfolio")
+                        st.rerun()
+        else:
+            st.info("No funds in portfolio yet. Search and add funds from the section above.")
+    
+    # SECTION 3 — Decision Helper
+    with st.expander("🧠 Decision Helper", expanded=False):
+        st.markdown("Auto-generated insights based on your portfolio performance.")
+        
+        if st.session_state["mf_portfolio"]:
+            insights = []
+            
+            for fund in st.session_state["mf_portfolio"]:
+                scheme_code = fund["scheme_code"]
+                scheme_name = fund["scheme_name"]
+                status = fund.get("status", "Continue")
+                
+                # Check 6-month return
+                historical_nav_data = get_historical_nav(scheme_code)
+                if historical_nav_data and len(historical_nav_data) > 180:
+                    latest_nav = float(historical_nav_data[0].get('nav', 0))
+                    nav_6m_ago = float(historical_nav_data[180].get('nav', 0))
+                    
+                    if nav_6m_ago > 0:
+                        return_6m = ((latest_nav - nav_6m_ago) / nav_6m_ago) * 100
+                        
+                        if return_6m < 0 and status == "Continue":
+                            insights.append(f"⚠️ **{scheme_name}** has been negative for 6+ months ({return_6m:.2f}%) — review your thesis")
+                
+                # Status-based insights
+                if status == "Exit":
+                    insights.append(f"⚠️ You've flagged **{scheme_name}** for exit. Check exit load before redeeming.")
+                elif status == "Increase SIP":
+                    insights.append(f"📈 Consider increasing SIP for **{scheme_name}**")
+            
+            # Overlap detection
+            all_holdings = []
+            for fund in st.session_state["mf_portfolio"]:
+                scheme_code = fund["scheme_code"]
+                holdings_data = get_fund_holdings(scheme_code)
+                if holdings_data and 'holdings' in holdings_data:
+                    top_stocks = [h.get('stock', '') for h in holdings_data['holdings'][:5]]
+                    all_holdings.append({
+                        "scheme_name": fund["scheme_name"],
+                        "top_stocks": top_stocks
+                    })
+            
+            # Check for overlaps
+            for i, fund_a in enumerate(all_holdings):
+                for j, fund_b in enumerate(all_holdings):
+                    if i < j:  # Avoid comparing same fund and duplicate pairs
+                        overlap = set(fund_a['top_stocks']) & set(fund_b['top_stocks'])
+                        if len(overlap) >= 3:
+                            insights.append(f"🔁 **{fund_a['scheme_name']}** and **{fund_b['scheme_name']}** overlap significantly — you may be over-concentrated in {', '.join(overlap)}")
+            
+            if insights:
+                for insight in insights:
+                    st.markdown(f"- {insight}")
+            else:
+                st.info("No insights generated. Your portfolio looks healthy!")
+        else:
+            st.info("Add funds to your portfolio to get personalized insights.")
 
 last_refresh = datetime.now().strftime("%d %b %Y, %I:%M:%S %p")
 st.markdown(

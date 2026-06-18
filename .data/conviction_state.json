@@ -1,0 +1,33 @@
+{
+  "tiers": {
+    "1": [
+      "BEL.NS",
+      "KAYNES.NS"
+    ],
+    "2": [
+      "INFY.NS"
+    ],
+    "3": [
+      "TCS.NS"
+    ]
+  },
+  "meta": {
+    "TCS.NS": {
+      "allocation_pct": 5.0,
+      "thesis": ""
+    },
+    "INFY.NS": {
+      "allocation_pct": 1.5,
+      "thesis": ""
+    },
+    "BEL.NS": {
+      "allocation_pct": 0.0,
+      "thesis": ""
+    },
+    "KAYNES.NS": {
+      "allocation_pct": 0.0,
+      "thesis": ""
+    }
+  },
+  "selected_symbol": "AEQUS.NS"
+}

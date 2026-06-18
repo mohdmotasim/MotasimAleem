@@ -1,0 +1,8 @@
+[
+  {
+    "key": "ctrl+shift+g",
+    "command": "workbench.action.tasks.runTask",
+    "args": "Auto Commit and Push",
+    "when": "editorTextFocus || !editorTextFocus"
+  }
+]

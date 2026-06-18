@@ -1,0 +1,24 @@
+[
+  {
+    "scheme_code": "120416",
+    "scheme_name": "Invesco India ELSS Tax Saver Fund - Direct Plan - Growth",
+    "units": 4.0,
+    "avg_nav": 200.14,
+    "investment_type": "Lump sum",
+    "status": "Continue",
+    "notes": "",
+    "live_nav": 142.35,
+    "nav_date": "15-06-2026"
+  },
+  {
+    "scheme_code": "118778",
+    "scheme_name": "Nippon India Small Cap Fund - Direct Plan Growth Plan - Growth Option",
+    "units": 20.0,
+    "avg_nav": 20.0,
+    "investment_type": "Lump sum",
+    "status": "Continue",
+    "notes": "",
+    "live_nav": 198.1162,
+    "nav_date": "15-06-2026"
+  }
+]

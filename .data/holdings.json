@@ -1,0 +1,38 @@
+[
+  {
+    "symbol": "VEDL.NS",
+    "quantity": 3.0,
+    "purchase_price": 269.45,
+    "added_date": "2026-05-22"
+  },
+  {
+    "symbol": "KAYNES.NS",
+    "quantity": 6.0,
+    "purchase_price": 3118.33,
+    "added_date": "2026-05-22"
+  },
+  {
+    "symbol": "HAL.NS",
+    "quantity": 4.0,
+    "purchase_price": 4182.0,
+    "added_date": "2026-05-22"
+  },
+  {
+    "symbol": "BEL.NS",
+    "quantity": 23.0,
+    "purchase_price": 409.0,
+    "added_date": "2026-06-05"
+  },
+  {
+    "symbol": "M&M.NS",
+    "quantity": 5.0,
+    "purchase_price": 2994.0,
+    "added_date": "2026-06-05"
+  },
+  {
+    "symbol": "NTPC.NS",
+    "quantity": 20.0,
+    "purchase_price": 372.0,
+    "added_date": "2026-06-05"
+  }
+]

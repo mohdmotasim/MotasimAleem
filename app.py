@@ -22,6 +22,22 @@ SP500_SYMBOL = "^GSPC"
 DEFAULT_WATCHLIST = ["RELIANCE.NS", "TCS.NS", "INFY.NS"]
 NSE_EQUITY_CSV_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
 
+# Sector PE mapping for Exit Tracker
+SECTOR_PE_MAP = {
+    "Technology": 22,
+    "Financial Services": 18,
+    "Consumer Defensive": 38,
+    "Consumer Cyclical": 28,
+    "Industrials": 30,
+    "Basic Materials": 14,
+    "Energy": 12,
+    "Healthcare": 32,
+    "Communication Services": 20,
+    "Real Estate": 25,
+    "Utilities": 16,
+    "Unknown": 20
+}
+
 # Cache directory for holdings data
 HOLDINGS_CACHE_DIR = Path(".data/holdings_cache")
 HOLDINGS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -2829,6 +2845,310 @@ def get_entry_timing_prefs(symbol: str) -> dict:
     return st.session_state["entry_timing"][symbol]
 
 
+# Exit Tracker scoring functions
+def calculate_exit_scores(holding: dict, stock_data: dict) -> dict:
+    """Calculate exit urgency scores for a holding."""
+    entry_price = holding["purchase_price"]
+    current_price = stock_data.get("current_price")
+    pe_ratio = stock_data.get("pe_ratio")
+    sector = stock_data.get("sector", "Unknown")
+    sector_pe = SECTOR_PE_MAP.get(sector, SECTOR_PE_MAP["Unknown"])
+    
+    # Calculate months held (default to 6 months if no date available)
+    months_held = 6  # Default fallback
+    
+    # SUB-SCORE A: VALUATION STRETCH (weight 20%)
+    if pe_ratio is None:
+        score_a = 40
+    else:
+        pe_discount = (sector_pe - pe_ratio) / sector_pe if sector_pe > 0 else 0
+        if pe_discount > 0.35:
+            score_a = 5
+        elif pe_discount > 0.20:
+            score_a = 15
+        elif pe_discount > 0.05:
+            score_a = 35
+        elif pe_discount > -0.10:
+            score_a = 60
+        elif pe_discount > -0.25:
+            score_a = 75
+        else:
+            score_a = 90
+    
+    # SUB-SCORE B: PRICE TARGET PROXIMITY (weight 20%)
+    zone1 = entry_price * 1.40
+    zone2 = entry_price * 1.85
+    zone3 = entry_price * 2.30
+    stop = entry_price * 0.75
+    
+    if current_price is None:
+        score_b = 50
+    else:
+        if current_price <= stop:
+            score_b = 100
+        elif current_price < zone1:
+            score_b = 10
+        elif current_price < zone2:
+            score_b = 40
+        elif current_price < zone3:
+            score_b = 72
+        else:
+            score_b = 95
+        
+        # Bonus for analyst target
+        analyst_target = stock_data.get("analyst_target")
+        if analyst_target and current_price >= analyst_target * 0.95:
+            score_b = min(score_b + 12, 100)
+    
+    # SUB-SCORE C: FUNDAMENTAL HEALTH (weight 30%)
+    base = 30
+    earnings_growth = stock_data.get("earnings_growth")
+    if earnings_growth is not None:
+        if earnings_growth > 0.15:
+            base -= 20
+        elif earnings_growth > 0.05:
+            base -= 10
+        elif earnings_growth > 0:
+            base += 5
+        elif earnings_growth > -0.10:
+            base += 20
+        else:
+            base += 35
+    
+    revenue_growth = stock_data.get("revenue_growth")
+    if revenue_growth is not None:
+        if revenue_growth > 0.10:
+            base -= 10
+        elif revenue_growth > 0:
+            base += 0
+        elif revenue_growth > -0.05:
+            base += 10
+        else:
+            base += 20
+    
+    profit_margins = stock_data.get("profit_margins")
+    if profit_margins is not None:
+        if profit_margins > 0.20:
+            base -= 5
+        elif profit_margins > 0.10:
+            base += 0
+        elif profit_margins > 0:
+            base += 10
+        else:
+            base += 25
+    
+    debt_to_equity = stock_data.get("debt_to_equity")
+    if debt_to_equity is not None:
+        if debt_to_equity < 30:
+            base -= 5
+        elif debt_to_equity < 80:
+            base += 0
+        elif debt_to_equity < 150:
+            base += 10
+        else:
+            base += 20
+    
+    score_c = max(0, min(100, base))
+    
+    # SUB-SCORE D: TIME ELAPSED (weight 10%)
+    if months_held < 12:
+        score_d = 5
+    elif months_held < 24:
+        score_d = 15
+    elif months_held < 36:
+        score_d = 25
+    elif months_held < 48:
+        score_d = 40
+    elif months_held < 60:
+        score_d = 55
+    else:
+        score_d = 75
+    
+    # SUB-SCORE E: ANALYST SENTIMENT (weight 10%)
+    recommendation = stock_data.get("recommendation", "").lower() if stock_data.get("recommendation") else None
+    if recommendation in ["strong_buy", "strongbuy"]:
+        score_e = 5
+    elif recommendation == "buy":
+        score_e = 20
+    elif recommendation == "hold":
+        score_e = 50
+    elif recommendation == "underperform":
+        score_e = 70
+    elif recommendation in ["sell", "strong_sell"]:
+        score_e = 90
+    else:
+        score_e = 40
+    
+    analyst_target = stock_data.get("analyst_target")
+    if analyst_target and current_price and current_price > analyst_target * 1.10:
+        score_e = min(score_e + 15, 100)
+    
+    # SUB-SCORE F: 52-WEEK POSITION (weight 10%)
+    week52_high = stock_data.get("week_52_high")
+    week52_low = stock_data.get("week_52_low")
+    if current_price and week52_high and week52_low and week52_high > week52_low:
+        range_position = (current_price - week52_low) / (week52_high - week52_low)
+        gain_from_entry = (current_price - entry_price) / entry_price if entry_price > 0 else 0
+        
+        if current_price <= stop:
+            score_f = 100
+        elif range_position > 0.90 and gain_from_entry > 0.50:
+            score_f = 80
+        elif range_position > 0.75:
+            score_f = 55
+        elif range_position > 0.40:
+            score_f = 30
+        elif range_position > 0.20:
+            score_f = 15
+        else:
+            score_f = 40
+    else:
+        score_f = 40
+    
+    # COMPOSITE SCORE
+    composite = (score_a * 0.20) + (score_b * 0.20) + (score_c * 0.30) + (score_d * 0.10) + (score_e * 0.10) + (score_f * 0.10)
+    composite = round(composite)
+    
+    # HARD OVERRIDES
+    if current_price and current_price <= stop:
+        composite = 100
+    elif earnings_growth is not None and earnings_growth < -0.20 and revenue_growth is not None and revenue_growth < -0.10:
+        composite = max(composite, 78)
+    elif recommendation in ["sell", "strong_sell"]:
+        composite = max(composite, 72)
+    
+    return {
+        "A_valuation": score_a,
+        "B_price_target": score_b,
+        "C_fundamentals": score_c,
+        "D_time": score_d,
+        "E_analyst": score_e,
+        "F_52w_position": score_f,
+        "composite": composite
+    }
+
+
+def get_exit_action(composite: int, current_price: float, entry_price: float, quantity: float) -> dict:
+    """Determine exit action based on composite score and price zones."""
+    zone1 = entry_price * 1.40
+    zone2 = entry_price * 1.85
+    zone3 = entry_price * 2.30
+    stop = entry_price * 0.75
+    
+    if current_price <= stop:
+        action = "EXIT — Stop Loss"
+        sell_qty = quantity
+    elif current_price >= zone3:
+        action = "EXIT — Zone 3 hit"
+        sell_qty = quantity
+    elif current_price >= zone2:
+        action = "TRIM 50% — Zone 2 hit"
+        sell_qty = int(quantity * 0.50)
+    elif current_price >= zone1:
+        action = "TRIM 25% — Zone 1 hit"
+        sell_qty = int(quantity * 0.25)
+    else:
+        if composite <= 30:
+            action = "HOLD STRONG"
+        elif composite <= 45:
+            action = "HOLD & WATCH"
+        elif composite <= 60:
+            action = "REVIEW"
+        elif composite <= 75:
+            action = "TRIM 25%"
+        elif composite <= 89:
+            action = "TRIM 50%"
+        else:
+            action = "EXIT"
+        sell_qty = 0
+    
+    sell_value = sell_qty * current_price
+    cost_basis = sell_qty * entry_price
+    pnl_inr = sell_value - cost_basis
+    pnl_pct = (pnl_inr / cost_basis * 100) if cost_basis > 0 else 0
+    
+    # Calculate next target
+    if current_price < zone1:
+        next_target = zone1
+    elif current_price < zone2:
+        next_target = zone2
+    elif current_price < zone3:
+        next_target = zone3
+    else:
+        next_target = None
+    
+    upside_to_next = ((next_target - current_price) / current_price * 100) if next_target and current_price > 0 else 0
+    value_at_next = quantity * next_target if next_target else 0
+    
+    return {
+        "action": action,
+        "sell_qty": sell_qty,
+        "sell_value": sell_value,
+        "pnl_inr": pnl_inr,
+        "pnl_pct": pnl_pct,
+        "zones": {
+            "zone1": zone1,
+            "zone2": zone2,
+            "zone3": zone3,
+            "stop_loss": stop
+        },
+        "next_target": next_target,
+        "upside_to_next": upside_to_next,
+        "value_at_next": value_at_next
+    }
+
+
+def evaluate_triggers(holding: dict, stock_data: dict, months_held: float) -> dict:
+    """Evaluate exit triggers for a holding."""
+    entry_price = holding["purchase_price"]
+    current_price = stock_data.get("current_price")
+    pe_ratio = stock_data.get("pe_ratio")
+    sector = stock_data.get("sector", "Unknown")
+    sector_pe = SECTOR_PE_MAP.get(sector, SECTOR_PE_MAP["Unknown"])
+    earnings_growth = stock_data.get("earnings_growth")
+    revenue_growth = stock_data.get("revenue_growth")
+    recommendation = stock_data.get("recommendation", "").lower() if stock_data.get("recommendation") else None
+    analyst_target = stock_data.get("analyst_target")
+    
+    triggers = {
+        "stop_loss": False,
+        "zone1_hit": False,
+        "zone2_hit": False,
+        "zone3_hit": False,
+        "sector_pe_converged": False,
+        "earnings_decline": False,
+        "analyst_downgrade": False,
+        "overshot_target": False,
+        "checkpoint_12mo": False,
+        "checkpoint_36mo": False,
+        "deadline_5yr": False
+    }
+    
+    if current_price:
+        triggers["stop_loss"] = current_price <= entry_price * 0.75
+        triggers["zone1_hit"] = current_price >= entry_price * 1.40
+        triggers["zone2_hit"] = current_price >= entry_price * 1.85
+        triggers["zone3_hit"] = current_price >= entry_price * 2.30
+    
+    if pe_ratio and sector_pe:
+        triggers["sector_pe_converged"] = pe_ratio >= sector_pe * 0.90
+    
+    if earnings_growth:
+        triggers["earnings_decline"] = earnings_growth < -0.05
+    
+    if recommendation:
+        triggers["analyst_downgrade"] = recommendation in ["sell", "strong_sell", "underperform"]
+    
+    if analyst_target and current_price:
+        triggers["overshot_target"] = current_price > analyst_target * 1.10
+    
+    triggers["checkpoint_12mo"] = 12 <= months_held <= 14
+    triggers["checkpoint_36mo"] = 36 <= months_held <= 38
+    triggers["deadline_5yr"] = months_held >= 60
+    
+    return triggers
+
+
 def _price_to_range_pct(
     price: float | None, range_low: float | None, range_high: float | None
 ) -> float | None:
@@ -3494,7 +3814,7 @@ if compare_on:
     else:
         st.session_state["compare_symbol"] = ""
 
-tab_research, tab_portfolio_health, tab_holdings, tab_scanner, tab_mutual_funds = st.tabs(["Research", "Portfolio Health", "Current Holdings", "Dark Horse Scanner", "Mutual Funds"])
+tab_research, tab_portfolio_health, tab_holdings, tab_scanner, tab_exit_tracker, tab_mutual_funds = st.tabs(["Research", "Portfolio Health", "Current Holdings", "Dark Horse Scanner", "Exit Tracker", "Mutual Funds"])
 
 selected = st.session_state.get("selected_symbol")
 compare_symbol = st.session_state.get("compare_symbol", "")
@@ -4225,6 +4545,200 @@ with tab_scanner:
 
     else:
         st.info("Click 'Run Scanner' to start screening stocks.")
+
+with tab_exit_tracker:
+    render_section_header(
+        "Exit Tracker",
+        "Track your holdings with exit urgency scores, sell zones, and trigger monitoring."
+    )
+    
+    # Get current holdings
+    holdings = get_holdings()
+    
+    if not holdings:
+        st.info("No holdings found. Add holdings in the Current Holdings tab to use Exit Tracker.")
+    else:
+        # Summary bar
+        total_invested = 0.0
+        total_current_value = 0.0
+        exit_signals = {"🔴": 0, "🟠": 0, "🟡": 0, "🔵": 0, "🟢": 0}
+        
+        enriched_holdings = []
+        
+        for holding in holdings:
+            symbol = holding["symbol"]
+            quantity = holding["quantity"]
+            entry_price = holding["purchase_price"]
+            
+            try:
+                stock_data = fetch_stock_data(symbol)
+                current_price = stock_data.get("current_price")
+                name = stock_data.get("name", symbol.removesuffix(NSE_SUFFIX))
+                
+                if current_price:
+                    invested = quantity * entry_price
+                    current_value = quantity * current_price
+                    total_invested += invested
+                    total_current_value += current_value
+                    
+                    # Calculate exit scores
+                    scores = calculate_exit_scores(holding, stock_data)
+                    action_data = get_exit_action(scores["composite"], current_price, entry_price, quantity)
+                    triggers = evaluate_triggers(holding, stock_data, 6)  # Default 6 months held
+                    
+                    # Determine signal emoji based on composite score
+                    if scores["composite"] <= 30:
+                        signal_emoji = "🟢"
+                    elif scores["composite"] <= 45:
+                        signal_emoji = "🔵"
+                    elif scores["composite"] <= 60:
+                        signal_emoji = "🟡"
+                    elif scores["composite"] <= 89:
+                        signal_emoji = "🟠"
+                    else:
+                        signal_emoji = "🔴"
+                    
+                    exit_signals[signal_emoji] += 1
+                    
+                    enriched_holdings.append({
+                        "symbol": symbol,
+                        "name": name,
+                        "quantity": quantity,
+                        "entry_price": entry_price,
+                        "current_price": current_price,
+                        "invested": invested,
+                        "current_value": current_value,
+                        "pnl": current_value - invested,
+                        "pnl_pct": ((current_value - invested) / invested * 100) if invested > 0 else 0,
+                        "scores": scores,
+                        "action": action_data,
+                        "triggers": triggers,
+                        "signal_emoji": signal_emoji,
+                        "stock_data": stock_data
+                    })
+            except Exception as e:
+                st.warning(f"Error fetching data for {symbol}: {e}")
+        
+        # Display summary bar
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Total Invested", format_inr(total_invested))
+        m2.metric("Current Value", format_inr(total_current_value))
+        
+        # Build exit signals display
+        signals_text = " ".join([f"{emoji}{count}" for emoji, count in exit_signals.items() if count > 0])
+        m3.metric("Exit Signals", signals_text or "No signals")
+        
+        # Refresh button
+        col_refresh, col_time = st.columns([1, 4])
+        with col_refresh:
+            if st.button("🔄 Refresh All Data", use_container_width=True):
+                st.cache_data.clear()
+                st.rerun()
+        with col_time:
+            st.caption(f"Last updated: {datetime.now().strftime('%I:%M %p')}")
+        
+        # Filter and sort controls
+        col_filter, col_sort = st.columns(2)
+        with col_filter:
+            filter_option = st.selectbox("Filter by Signal", ["All", "🔴 Exit/Trim", "🟡 Review", "🔵 Hold & Watch", "🟢 Hold Strong"])
+        with col_sort:
+            sort_option = st.selectbox("Sort by", ["Exit Score ↓", "P&L%", "Holding Period", "Invested"])
+        
+        # Apply filters
+        filtered_holdings = enriched_holdings
+        if filter_option != "All":
+            if filter_option == "🔴 Exit/Trim":
+                filtered_holdings = [h for h in enriched_holdings if h["signal_emoji"] in ["🔴", "🟠"]]
+            elif filter_option == "🟡 Review":
+                filtered_holdings = [h for h in enriched_holdings if h["signal_emoji"] == "🟡"]
+            elif filter_option == "🔵 Hold & Watch":
+                filtered_holdings = [h for h in enriched_holdings if h["signal_emoji"] == "🔵"]
+            elif filter_option == "🟢 Hold Strong":
+                filtered_holdings = [h for h in enriched_holdings if h["signal_emoji"] == "🟢"]
+        
+        # Apply sorting
+        if sort_option == "Exit Score ↓":
+            filtered_holdings.sort(key=lambda x: x["scores"]["composite"], reverse=True)
+        elif sort_option == "P&L%":
+            filtered_holdings.sort(key=lambda x: x["pnl_pct"], reverse=True)
+        elif sort_option == "Invested":
+            filtered_holdings.sort(key=lambda x: x["invested"], reverse=True)
+        
+        # Display holdings as cards
+        st.markdown("### Holdings")
+        
+        for holding in filtered_holdings:
+            with st.container(border=True):
+                # Header
+                col1, col2, col3 = st.columns([3, 2, 2])
+                with col1:
+                    st.markdown(f"**{holding['symbol']}** · {holding['name']}")
+                with col2:
+                    st.markdown(f"**{format_inr(holding['current_price'])}** {holding['signal_emoji']}")
+                with col3:
+                    st.markdown(f"Qty: {holding['quantity']} · Value: {format_inr(holding['current_value'])}")
+                
+                # Entry and P&L
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.markdown(f"Entry: {format_inr(holding['entry_price'])}")
+                with col2:
+                    pnl_color = "green" if holding['pnl'] >= 0 else "red"
+                    st.markdown(f"<span style='color: {pnl_color}'>P&L: {format_inr(holding['pnl'])} ({holding['pnl_pct']:+.1f}%)</span>", unsafe_allow_html=True)
+                with col3:
+                    st.markdown(f"Score: **{holding['scores']['composite']}/100**")
+                
+                # Score breakdown
+                st.markdown("**Score Breakdown**")
+                score_cols = st.columns(3)
+                with score_cols[0]:
+                    st.markdown(f"Valuation: {holding['scores']['A_valuation']}/100")
+                    st.progress(holding['scores']['A_valuation'] / 100)
+                with score_cols[1]:
+                    st.markdown(f"Price Target: {holding['scores']['B_price_target']}/100")
+                    st.progress(holding['scores']['B_price_target'] / 100)
+                with score_cols[2]:
+                    st.markdown(f"Fundamentals: {holding['scores']['C_fundamentals']}/100")
+                    st.progress(holding['scores']['C_fundamentals'] / 100)
+                
+                # Sell zones
+                st.markdown("**Sell Zones**")
+                zones = holding['action']['zones']
+                st.markdown(f"Zone 1: {format_inr(zones['zone1'])} (+40%) · Trim 25%")
+                st.markdown(f"Zone 2: {format_inr(zones['zone2'])} (+85%) · Trim 50%")
+                st.markdown(f"Zone 3: {format_inr(zones['zone3'])} (+130%) · Exit All")
+                st.markdown(f"🛑 Stop: {format_inr(zones['stop_loss'])} (-25%) · Exit All")
+                
+                # Current action
+                st.markdown(f"**Current Action:** {holding['action']['action']}")
+                if holding['action']['next_target']:
+                    st.markdown(f"Next Target: {format_inr(holding['action']['next_target'])} (+{holding['action']['upside_to_next']:.1f}%)")
+                
+                # Trigger checklist (collapsed)
+                with st.expander("🔍 Trigger Checklist"):
+                    trigger_items = []
+                    if holding['triggers']['stop_loss']:
+                        trigger_items.append("🔴 Stop-loss triggered")
+                    if holding['triggers']['zone1_hit']:
+                        trigger_items.append("🟠 Zone 1 hit")
+                    if holding['triggers']['zone2_hit']:
+                        trigger_items.append("🟠 Zone 2 hit")
+                    if holding['triggers']['zone3_hit']:
+                        trigger_items.append("🔴 Zone 3 hit")
+                    if holding['triggers']['sector_pe_converged']:
+                        trigger_items.append("⚠️ Sector PE discount closing")
+                    if holding['triggers']['earnings_decline']:
+                        trigger_items.append("🔴 Earnings declining")
+                    if holding['triggers']['analyst_downgrade']:
+                        trigger_items.append("🔴 Analyst downgrade")
+                    if holding['triggers']['overshot_target']:
+                        trigger_items.append("🟠 Overshot analyst target")
+                    
+                    if trigger_items:
+                        for item in trigger_items:
+                            st.markdown(item)
+                    else:
+                        st.markdown("✅ No triggers activated")
 
 with tab_mutual_funds:
     render_section_header(

@@ -13,11 +13,5 @@ pandas==2.2.2
 # Visualization
 plotly==5.17.0
 
-# News RSS parsing
-feedparser==6.0.10
-
 # HTTP requests
 requests==2.31.0
-
-# Additional dependencies that may be needed
-python-dateutil>=2.8.2

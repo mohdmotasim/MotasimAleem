@@ -11,7 +11,6 @@ from datetime import datetime, timedelta
 from io import StringIO
 from pathlib import Path
 
-import feedparser
 import pandas as pd
 import plotly.express as px
 import requests

@@ -1,8 +1,5 @@
 # Investment Dashboard - Core Dependencies
 # Install with: pip install -r requirements.txt
-#
-# Python version requirement: 3.10 - 3.13
-# Note: Python 3.14+ may not have pre-built wheels for all packages yet
 
 # Streamlit framework
 streamlit==1.36.0
@@ -11,13 +8,13 @@ streamlit==1.36.0
 yfinance==0.2.38
 
 # Data manipulation
-pandas>=2.0.0
+pandas==2.0.3
 
 # Visualization
-plotly>=5.0.0
+plotly==5.17.0
 
 # News RSS parsing
-feedparser>=6.0.0
+feedparser==6.0.10
 
 # HTTP requests
-requests>=2.31.0
+requests==2.31.0

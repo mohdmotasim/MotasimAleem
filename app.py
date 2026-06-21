@@ -2324,13 +2324,9 @@ def render_sector_stocks() -> None:
         # Display each stock with metrics in pipe-separated format
         for stock in stocks:
             pe_str = f"PE {stock['pe']:.1f}" if stock['pe'] else "PE -"
-            change_str = f"{stock['change_1w']:+.1f}%" if stock['change_1w'] is not None else ""
             
-            # Single line with pipe-separated format including button
-            if change_str:
-                stock_line = f"{stock['name']} || ₹{stock['price']:.0f} || {pe_str} || {change_str}"
-            else:
-                stock_line = f"{stock['name']} || ₹{stock['price']:.0f} || {pe_str}"
+            # Single line with pipe-separated format including button (only PE, no change)
+            stock_line = f"{stock['name']} || ₹{stock['price']:.0f} || {pe_str}"
             
             # Display line with inline button
             if st.sidebar.button(f"{stock_line}", key=f"sector_open_{stock['symbol']}", help=f"Open {stock['name']}", use_container_width=True):

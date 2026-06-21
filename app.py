@@ -1,5 +1,6 @@
 import difflib
 import json
+import logging
 import os
 import re
 import statistics
@@ -16,6 +17,9 @@ import plotly.express as px
 import requests
 import streamlit as st
 import yfinance as yf
+
+# Suppress yfinance logging
+logging.getLogger('yfinance').setLevel(logging.WARNING)
 
 NSE_SUFFIX = ".NS"
 SP500_SYMBOL = "^GSPC"
@@ -485,8 +489,20 @@ CONVICTION_STATE_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), ".data", "conviction_state.json"
 )
 
+# Portfolio management
+PORTFOLIOS_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "Kite holdings screenshot", "portfolios"
+)
+PORTFOLIOS_DIR = os.path.abspath(PORTFOLIOS_DIR)
+os.makedirs(PORTFOLIOS_DIR, exist_ok=True)
+
+PORTFOLIOS_CONFIG_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "Kite holdings screenshot", "portfolios_config.json"
+)
+
+# Legacy holdings file (for backward compatibility)
 HOLDINGS_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".data", "holdings.json"
+    os.path.dirname(os.path.abspath(__file__)), "Kite holdings screenshot", "holdings.json"
 )
 
 SCANNER_RESULTS_FILE = os.path.join(
@@ -510,6 +526,374 @@ def _default_mf_portfolio() -> list[dict]:
     return []
 
 
+# Portfolio Management Functions
+def get_portfolios_config() -> dict:
+    """Get portfolios configuration."""
+    if os.path.exists(PORTFOLIOS_CONFIG_FILE):
+        try:
+            with open(PORTFOLIOS_CONFIG_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    # Default configuration
+    return {
+        "portfolios": [
+            {"id": "default", "name": "Default Portfolio", "created": datetime.now().strftime("%Y-%m-%d")}
+        ],
+        "current_portfolio": "default"
+    }
+
+
+def save_portfolios_config(config: dict) -> None:
+    """Save portfolios configuration."""
+    with open(PORTFOLIOS_CONFIG_FILE, "w") as f:
+        json.dump(config, f, indent=2)
+
+
+def get_current_portfolio_id() -> str:
+    """Get current portfolio ID from session state or config."""
+    if "current_portfolio_id" in st.session_state:
+        return st.session_state["current_portfolio_id"]
+    
+    config = get_portfolios_config()
+    return config.get("current_portfolio", "default")
+
+
+def set_current_portfolio_id(portfolio_id: str) -> None:
+    """Set current portfolio ID and clear holdings session state."""
+    old_portfolio_id = get_current_portfolio_id()
+    st.session_state["current_portfolio_id"] = portfolio_id
+    
+    # Update config
+    config = get_portfolios_config()
+    config["current_portfolio"] = portfolio_id
+    save_portfolios_config(config)
+    
+    # Clear holdings session state when switching portfolios
+    if old_portfolio_id != portfolio_id:
+        if "holdings" in st.session_state:
+            del st.session_state["holdings"]
+
+
+def create_portfolio(name: str) -> str:
+    """Create a new portfolio and return its ID."""
+    config = get_portfolios_config()
+    
+    # Generate unique ID
+    portfolio_id = name.lower().replace(" ", "_") + "_" + str(int(datetime.now().timestamp()))
+    
+    # Add to config
+    config["portfolios"].append({
+        "id": portfolio_id,
+        "name": name,
+        "created": datetime.now().strftime("%Y-%m-%d")
+    })
+    
+    save_portfolios_config(config)
+    
+    # Create portfolio directory
+    portfolio_dir = os.path.join(PORTFOLIOS_DIR, portfolio_id)
+    os.makedirs(portfolio_dir, exist_ok=True)
+    
+    return portfolio_id
+
+
+def delete_portfolio(portfolio_id: str) -> None:
+    """Delete a portfolio."""
+    config = get_portfolios_config()
+    
+    # Remove from config
+    config["portfolios"] = [p for p in config["portfolios"] if p["id"] != portfolio_id]
+    
+    # If deleting current portfolio, switch to default
+    if config.get("current_portfolio") == portfolio_id:
+        config["current_portfolio"] = "default"
+        st.session_state["current_portfolio_id"] = "default"
+    
+    save_portfolios_config(config)
+    
+    # Delete portfolio directory
+    portfolio_dir = os.path.join(PORTFOLIOS_DIR, portfolio_id)
+    if os.path.exists(portfolio_dir):
+        import shutil
+        shutil.rmtree(portfolio_dir)
+
+
+def get_portfolio_file_path(portfolio_id: str, filename: str) -> str:
+    """Get file path for a specific portfolio."""
+    portfolio_dir = os.path.join(PORTFOLIOS_DIR, portfolio_id)
+    os.makedirs(portfolio_dir, exist_ok=True)
+    return os.path.join(portfolio_dir, filename)
+
+
+def get_holdings_file_for_portfolio(portfolio_id: str) -> str:
+    """Get holdings file path for a specific portfolio."""
+    return get_portfolio_file_path(portfolio_id, "holdings.json")
+
+
+def get_current_holdings_file() -> str:
+    """Get holdings file path for current portfolio."""
+    portfolio_id = get_current_portfolio_id()
+    return get_holdings_file_for_portfolio(portfolio_id)
+
+
+def render_portfolio_selector(location: str = "default") -> str:
+    """Render portfolio selector UI and return current portfolio ID.
+    
+    Args:
+        location: Identifier for where this selector is being used (to avoid key conflicts)
+    """
+    config = get_portfolios_config()
+    portfolios = config.get("portfolios", [])
+    current_portfolio_id = get_current_portfolio_id()
+    
+    if not portfolios:
+        return current_portfolio_id
+    
+    portfolio_names = [p["name"] for p in portfolios]
+    current_index = next((i for i, p in enumerate(portfolios) if p["id"] == current_portfolio_id), 0)
+    
+    col_select, col_create, col_delete, col_export_import = st.columns([3, 1, 1, 1])
+    
+    with col_select:
+        selected_portfolio_name = st.selectbox(
+            "📁 Select Portfolio",
+            portfolio_names,
+            index=current_index,
+            key=f"portfolio_selector_{location}"
+        )
+    
+    with col_create:
+        if st.button("➕ New", use_container_width=True, key=f"create_portfolio_btn_{location}"):
+            st.session_state[f"show_create_portfolio_{location}"] = True
+    
+    with col_delete:
+        if st.button("🗑️ Delete", use_container_width=True, key=f"delete_portfolio_btn_{location}"):
+            st.session_state[f"show_delete_portfolio_{location}"] = True
+    
+    with col_export_import:
+        if st.button("💾 Save", use_container_width=True, key=f"export_portfolio_btn_{location}", help="Export portfolio data"):
+            st.session_state[f"show_export_portfolio_{location}"] = True
+        if st.button("📥 Load", use_container_width=True, key=f"import_portfolio_btn_{location}", help="Import portfolio data"):
+            st.session_state[f"show_import_portfolio_{location}"] = True
+    
+    # Update current portfolio if changed
+    selected_portfolio_id = portfolios[portfolio_names.index(selected_portfolio_name)]["id"]
+    if selected_portfolio_id != current_portfolio_id:
+        set_current_portfolio_id(selected_portfolio_id)
+        st.rerun()
+    
+    # Create portfolio dialog
+    if st.session_state.get(f"show_create_portfolio_{location}", False):
+        with st.expander("Create New Portfolio", expanded=True):
+            new_portfolio_name = st.text_input("Portfolio Name", key=f"new_portfolio_name_{location}")
+            col_confirm, col_cancel = st.columns(2)
+            with col_confirm:
+                if st.button("Create", key=f"confirm_create_portfolio_{location}"):
+                    if new_portfolio_name.strip():
+                        new_id = create_portfolio(new_portfolio_name.strip())
+                        set_current_portfolio_id(new_id)
+                        st.session_state[f"show_create_portfolio_{location}"] = False
+                        st.success(f"Created portfolio: {new_portfolio_name}")
+                        st.rerun()
+                    else:
+                        st.warning("Please enter a portfolio name")
+            with col_cancel:
+                if st.button("Cancel", key=f"cancel_create_portfolio_{location}"):
+                    st.session_state[f"show_create_portfolio_{location}"] = False
+                    st.rerun()
+    
+    # Delete portfolio dialog
+    if st.session_state.get(f"show_delete_portfolio_{location}", False):
+        with st.expander("Delete Portfolio", expanded=True):
+            if len(portfolios) <= 1:
+                st.warning("Cannot delete the only portfolio")
+                if st.button("Close", key=f"close_delete_portfolio_{location}"):
+                    st.session_state[f"show_delete_portfolio_{location}"] = False
+                    st.rerun()
+            else:
+                st.warning(f"Are you sure you want to delete '{selected_portfolio_name}'?")
+                col_confirm, col_cancel = st.columns(2)
+                with col_confirm:
+                    if st.button("Yes, Delete", key=f"confirm_delete_portfolio_{location}"):
+                        delete_portfolio(current_portfolio_id)
+                        st.session_state[f"show_delete_portfolio_{location}"] = False
+                        st.success("Portfolio deleted")
+                        st.rerun()
+                with col_cancel:
+                    if st.button("Cancel", key=f"cancel_delete_portfolio_{location}"):
+                        st.session_state[f"show_delete_portfolio_{location}"] = False
+                        st.rerun()
+    
+    # Export portfolio dialog
+    if st.session_state.get(f"show_export_portfolio_{location}", False):
+        with st.expander("Export Portfolio Data", expanded=True):
+            st.info("Download your portfolio data to save it locally. You can import it back later.")
+            
+            # Prepare export data
+            export_data = {
+                "portfolio_config": config,
+                "holdings": get_holdings(),
+                "export_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            
+            export_json = json.dumps(export_data, indent=2)
+            st.download_button(
+                label="💾 Download Portfolio JSON",
+                data=export_json,
+                file_name=f"portfolio_export_{selected_portfolio_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.json",
+                mime="application/json",
+                key=f"download_portfolio_{location}"
+            )
+            
+            if st.button("Close", key=f"close_export_portfolio_{location}"):
+                st.session_state[f"show_export_portfolio_{location}"] = False
+                st.rerun()
+    
+    # Import portfolio dialog
+    if st.session_state.get(f"show_import_portfolio_{location}", False):
+        with st.expander("Import Portfolio Data", expanded=True):
+            st.info("Upload a previously exported portfolio JSON file to restore your data.")
+            uploaded_file = st.file_uploader("Upload Portfolio JSON", type=['json'], key=f"import_file_{location}")
+            
+            if uploaded_file is not None:
+                try:
+                    import_data = json.load(uploaded_file)
+                    
+                    if "portfolio_config" in import_data and "holdings" in import_data:
+                        # Restore portfolio config
+                        imported_config = import_data["portfolio_config"]
+                        imported_holdings = import_data["holdings"]
+                        
+                        # Merge portfolios from import
+                        current_config = get_portfolios_config()
+                        existing_portfolio_ids = {p["id"] for p in current_config.get("portfolios", [])}
+                        
+                        for imported_portfolio in imported_config.get("portfolios", []):
+                            if imported_portfolio["id"] not in existing_portfolio_ids:
+                                current_config["portfolios"].append(imported_portfolio)
+                                # Create portfolio directory
+                                portfolio_dir = os.path.join(PORTFOLIOS_DIR, imported_portfolio["id"])
+                                os.makedirs(portfolio_dir, exist_ok=True)
+                        
+                        save_portfolios_config(current_config)
+                        
+                        # Restore holdings for current portfolio
+                        st.session_state["holdings"] = imported_holdings
+                        _save_holdings_to_disk(imported_holdings)
+                        
+                        st.success(f"Portfolio imported successfully! Export date: {import_data.get('export_date', 'Unknown')}")
+                        st.session_state[f"show_import_portfolio_{location}"] = False
+                        st.rerun()
+                    else:
+                        st.error("Invalid portfolio file format. Missing required data.")
+                except Exception as e:
+                    st.error(f"Error importing portfolio: {e}")
+            
+            if st.button("Cancel", key=f"cancel_import_portfolio_{location}"):
+                st.session_state[f"show_import_portfolio_{location}"] = False
+                st.rerun()
+    
+    return selected_portfolio_id
+
+
+def parse_kite_csv(csv_file) -> list[dict]:
+    """Parse Kite holdings CSV to extract stock data."""
+    try:
+        df = pd.read_csv(csv_file)
+        
+        holdings = []
+        
+        # Kite CSV typically has columns like: Instrument, Qty, Avg. price, LTP, P&L, etc.
+        # We need to map these to our format
+        for _, row in df.iterrows():
+            # Try to find the symbol column
+            symbol = None
+            for col in df.columns:
+                if 'instrument' in col.lower() or 'symbol' in col.lower() or 'tradingsymbol' in col.lower():
+                    symbol = str(row[col]).strip().upper()
+                    break
+            
+            if not symbol:
+                continue
+            
+            # Try to find quantity column
+            qty = None
+            for col in df.columns:
+                if 'qty' in col.lower() or 'quantity' in col.lower():
+                    qty = float(row[col])
+                    break
+            
+            # Try to find average price column
+            avg_price = None
+            for col in df.columns:
+                if 'avg' in col.lower() or 'average' in col.lower():
+                    avg_price = float(row[col])
+                    break
+            
+            if qty is None or avg_price is None:
+                continue
+            
+            # Add .NS suffix if not present
+            if not symbol.endswith('.NS'):
+                symbol = f"{symbol}.NS"
+            
+            holdings.append({
+                "symbol": symbol,
+                "quantity": qty,
+                "purchase_price": avg_price
+            })
+        
+        return holdings
+    except Exception as e:
+        st.error(f"Error parsing Kite CSV: {e}")
+        return []
+
+
+def update_holdings_from_csv(extracted_holdings: list[dict], mode: str = "replace") -> None:
+    """Update holdings from CSV with smart update logic.
+    
+    Args:
+        extracted_holdings: List of holdings from CSV
+        mode: "replace" to clear all holdings first, "update" to smart update existing
+    """
+    current_holdings = get_holdings()
+    
+    if mode == "replace":
+        # Clear all holdings and add new ones
+        st.session_state["holdings"] = []
+        for h in extracted_holdings:
+            add_holding(h["symbol"], h["quantity"], h["purchase_price"])
+    elif mode == "update":
+        # Smart update: update existing holdings, add new ones
+        # Create a dictionary of current holdings for easy lookup
+        current_holdings_dict = {h["symbol"]: h for h in current_holdings}
+        
+        # Update or add each holding from CSV
+        for csv_holding in extracted_holdings:
+            symbol = csv_holding["symbol"]
+            if symbol in current_holdings_dict:
+                # Update existing holding
+                update_holding_by_symbol(symbol, csv_holding["quantity"], csv_holding["purchase_price"])
+            else:
+                # Add new holding
+                add_holding(symbol, csv_holding["quantity"], csv_holding["purchase_price"])
+        
+        # Note: We don't remove holdings that are not in CSV, as user might want to keep them
+
+
+def update_holding_by_symbol(symbol: str, quantity: float, purchase_price: float) -> None:
+    """Update an existing holding by symbol."""
+    holdings = get_holdings()
+    for i, h in enumerate(holdings):
+        if h["symbol"] == symbol:
+            holdings[i]["quantity"] = quantity
+            holdings[i]["purchase_price"] = purchase_price
+            holdings[i]["added_date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            break
+    _save_holdings_to_disk(holdings)
+
+
 def _load_mf_portfolio_from_disk() -> list[dict] | None:
     if not os.path.isfile(MF_PORTFOLIO_FILE):
         return None
@@ -530,10 +914,11 @@ def _save_mf_portfolio_to_disk(portfolio: list[dict]) -> None:
 
 
 def _load_holdings_from_disk() -> list[dict] | None:
-    if not os.path.isfile(HOLDINGS_FILE):
+    holdings_file = get_current_holdings_file()
+    if not os.path.isfile(holdings_file):
         return None
     try:
-        with open(HOLDINGS_FILE, encoding="utf-8") as handle:
+        with open(holdings_file, encoding="utf-8") as handle:
             data = json.load(handle)
         if not isinstance(data, list):
             return None
@@ -543,9 +928,10 @@ def _load_holdings_from_disk() -> list[dict] | None:
 
 
 def _save_holdings_to_disk(holdings: list[dict]) -> None:
+    holdings_file = get_current_holdings_file()
     try:
-        os.makedirs(os.path.dirname(HOLDINGS_FILE), exist_ok=True)
-        with open(HOLDINGS_FILE, "w", encoding="utf-8") as handle:
+        os.makedirs(os.path.dirname(holdings_file), exist_ok=True)
+        with open(holdings_file, "w", encoding="utf-8") as handle:
             json.dump(holdings, handle, indent=2)
     except OSError:
         pass
@@ -3784,6 +4170,7 @@ if search_clicked:
             st.session_state["selected_symbol"] = ticker
             st.rerun()
 
+st.sidebar.markdown("---")
 st.sidebar.markdown("### Top Sector Stocks")
 render_sector_stocks()
 
@@ -3842,13 +4229,69 @@ with tab_research:
         st.info("Search for an NSE stock or select one from the watchlist sidebar.")
 
 with tab_portfolio_health:
+    # Cloud deployment warning
+    st.warning("⚠️ **Cloud Deployment Notice:** Portfolio data is not automatically saved on cloud. Use the 💾 Save button to export your data before closing the app.")
+    render_portfolio_selector(location="portfolio_health")
+    st.markdown("---")
     render_portfolio_health_tab()
 
 with tab_holdings:
+    # Cloud deployment warning
+    st.warning("⚠️ **Cloud Deployment Notice:** Portfolio data is not automatically saved on cloud. Use the 💾 Save button to export your data before closing the app.")
+    render_portfolio_selector(location="holdings")
+    st.markdown("---")
     render_section_header(
         "Current Holdings",
         "Track your actual positions with quantity, purchase price, and profit/loss calculation."
     )
+
+    # Kite CSV import section
+    with st.expander("📁 Import from Kite CSV", expanded=False):
+        st.markdown("Upload your Kite holdings CSV file to automatically extract and import your portfolio.")
+        uploaded_file = st.file_uploader("Upload Kite CSV", type=['csv'])
+        
+        if uploaded_file is not None:
+            # Parse the CSV
+            with st.spinner("Extracting holdings from CSV..."):
+                extracted_holdings = parse_kite_csv(uploaded_file)
+            
+            if extracted_holdings:
+                st.success(f"Extracted {len(extracted_holdings)} holdings from CSV!")
+                
+                # Show extracted data for confirmation
+                st.markdown("### Extracted Holdings (Preview)")
+                preview_data = []
+                for h in extracted_holdings:
+                    preview_data.append({
+                        "Symbol": h["symbol"],
+                        "Quantity": h["quantity"],
+                        "Purchase Price": h["purchase_price"]
+                    })
+                st.dataframe(pd.DataFrame(preview_data), use_container_width=True, hide_index=True)
+                
+                # Confirm import
+                col_replace, col_update, col_append = st.columns(3)
+                with col_replace:
+                    if st.button("🔄 Replace All", use_container_width=True):
+                        # Clear existing holdings and add extracted ones
+                        update_holdings_from_csv(extracted_holdings, mode="replace")
+                        st.success(f"Successfully imported {len(extracted_holdings)} holdings!")
+                        st.rerun()
+                with col_update:
+                    if st.button("🔄 Smart Update", use_container_width=True):
+                        # Smart update: update existing, add new
+                        update_holdings_from_csv(extracted_holdings, mode="update")
+                        st.success(f"Successfully updated holdings with {len(extracted_holdings)} entries!")
+                        st.rerun()
+                with col_append:
+                    if st.button("➕ Append Only", use_container_width=True):
+                        # Add to existing holdings without updating
+                        for h in extracted_holdings:
+                            add_holding(h["symbol"], h["quantity"], h["purchase_price"])
+                        st.success(f"Successfully added {len(extracted_holdings)} holdings!")
+                        st.rerun()
+            else:
+                st.warning("Could not extract holdings from the CSV. Please ensure the file is a valid Kite holdings export.")
 
     holdings = get_holdings()
 
@@ -4022,13 +4465,11 @@ with tab_scanner:
         results = []
         skipped = 0
 
-        progress_bar = st.progress(0, text="Starting scanner...")
-        status_text = st.empty()
+        progress_bar = st.progress(0)
 
         for idx, sym in enumerate(stocks_to_screen):
             progress = (idx + 1) / len(stocks_to_screen)
-            progress_bar.progress(progress, text=f"Analyzing {sym} ({idx + 1}/{len(stocks_to_screen)})")
-            status_text.text(f"Current: {sym} | Found: {len(results)} | Skipped: {skipped}")
+            progress_bar.progress(progress, text=f"Scanning {sym} ({idx + 1}/{len(stocks_to_screen)})")
 
             try:
                 data = fetch_stock_data(sym)
@@ -4231,9 +4672,8 @@ with tab_scanner:
                 "risk_flag": risk_flag,
             })
 
-        # Cleanup progress indicators
+        # Cleanup progress bar
         progress_bar.empty()
-        status_text.empty()
 
         # Calculate upside potential and sort by it
         for r in results:

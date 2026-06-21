@@ -20,8 +20,5 @@ plotly>=5.0.0
 # News RSS parsing
 feedparser>=6.0.0
 
-# Optional: Voice-to-chat helper dependencies
-# Uncomment these lines if you want to use voice_to_chat.py
-# sounddevice>=0.4.0
-# SpeechRecognition>=3.10.0
-# pyautogui>=0.9.50
+# HTTP requests
+requests>=2.31.0

@@ -8,7 +8,7 @@ streamlit==1.36.0
 yfinance==0.2.38
 
 # Data manipulation
-pandas==2.0.3
+pandas==2.2.2
 
 # Visualization
 plotly==5.17.0

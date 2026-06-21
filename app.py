@@ -17,6 +17,13 @@ import requests
 import streamlit as st
 import yfinance as yf
 
+# Try to import feedparser for RSS news (works on localhost, fails on Python 3.14 cloud)
+try:
+    import feedparser
+    HAS_FEEDPARSER = True
+except ImportError:
+    HAS_FEEDPARSER = False
+
 # Suppress yfinance logging
 logging.getLogger('yfinance').setLevel(logging.WARNING)
 
@@ -1602,6 +1609,8 @@ def _strip_html(text: str) -> str:
 
 @st.cache_data(ttl=600)
 def fetch_google_news_stories(stock_name: str, limit: int = 8) -> list[dict]:
+    if not HAS_FEEDPARSER:
+        return []
     query = urllib.parse.quote_plus(f"{stock_name} stock")
     rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
     feed = feedparser.parse(rss_url)

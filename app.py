@@ -20,6 +20,10 @@ import yfinance as yf
 # Suppress yfinance logging
 logging.getLogger('yfinance').setLevel(logging.WARNING)
 
+# Suppress Streamlit deprecation warnings
+import warnings
+warnings.filterwarnings('ignore', message='Please replace `use_container_width` with `width`')
+
 NSE_SUFFIX = ".NS"
 SP500_SYMBOL = "^GSPC"
 DEFAULT_WATCHLIST = ["RELIANCE.NS", "TCS.NS", "INFY.NS"]
@@ -2279,10 +2283,10 @@ def fetch_sector_stocks_data() -> dict:
                 pe = _safe_float(info.get("trailingPE") or info.get("forwardPE"))
                 market_cap = _safe_float(info.get("marketCap"))
                 
-                # Calculate 1-week change
+                # Calculate 1-week change (using 5d period for yfinance compatibility)
                 change_1w = None
                 try:
-                    hist = ticker.history(period="1w")
+                    hist = ticker.history(period="5d")
                     if len(hist) >= 2:
                         start_price = hist['Close'].iloc[0]
                         end_price = hist['Close'].iloc[-1]

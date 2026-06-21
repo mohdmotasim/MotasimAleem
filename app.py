@@ -4610,10 +4610,9 @@ with tab_scanner:
                         # Calculate exit point based on forecast
                         forecast_50w = current_price * (1 + risk_adjusted_return)
 
-                        # Ensure exit point is reasonable (between 10% and 50% gain)
-                        min_exit = entry_point * 1.10 if entry_point else current_price * 1.10
+                        # Ensure exit point is reasonable (maximum 50% gain, no minimum floor)
                         max_exit = entry_point * 1.50 if entry_point else current_price * 1.50
-                        forecast_50w = max(min_exit, min(max_exit, forecast_50w))
+                        forecast_50w = min(max_exit, forecast_50w)
                     else:
                         # Fallback if insufficient historical data
                         forecast_50w = current_price * 1.25  # 25% target
@@ -4696,11 +4695,14 @@ with tab_scanner:
         # Filter by min_score
         filtered_results = [r for r in results if r["score"] >= min_score]
 
+        # Filter by minimum upside potential (8%)
+        filtered_results = [r for r in filtered_results if r.get("upside_potential", 0) >= 8]
+
         # If no results meet criteria, show top 3 from all scanned stocks
         if not filtered_results:
             if results:
                 filtered_results = results[:3]
-                st.warning(f"No stocks met your minimum score of {min_score}. Showing top 3 candidates from scanned stocks.")
+                st.warning(f"No stocks met your minimum score of {min_score} and 8% upside. Showing top 3 candidates from scanned stocks.")
             else:
                 st.warning("No stocks had sufficient data for analysis. Try again later or check your internet connection.")
 

@@ -15,6 +15,8 @@ import pandas as pd
 import plotly.express as px
 import requests
 import streamlit as st
+import json
+from pathlib import Path
 import yfinance as yf
 
 # Try to import feedparser for RSS news (works on localhost, fails on Python 3.14 cloud)
@@ -1842,34 +1844,50 @@ def _revenue_cagr_3y(ticker: yf.Ticker, info: dict) -> tuple[float | None, str]:
 
 
 def _insider_buy_sell_ratio_6m(ticker: yf.Ticker) -> tuple[float | None, str]:
+    # FIX 7.1: Add null guard and staleness check
     try:
-        tx = ticker.insider_transactions
-        if tx is None or tx.empty:
-            return None, "No insider transaction data"
-        df = tx.copy()
-        if "Start Date" in df.columns:
-            df["Start Date"] = pd.to_datetime(df["Start Date"], errors="coerce")
-            cutoff = datetime.now() - timedelta(days=183)
-            df = df[df["Start Date"] >= cutoff]
-        buys = 0.0
-        sells = 0.0
-        text_col = next((c for c in df.columns if "Text" in c or "Transaction" in c), None)
-        shares_col = next((c for c in df.columns if "Shares" in c or "Value" in c), None)
-        for _, row in df.iterrows():
-            label = str(row.get(text_col, "")).lower() if text_col else ""
-            qty = abs(_safe_float(row.get(shares_col)) or 0) if shares_col else 1.0
-            if "buy" in label or "purchase" in label:
-                buys += qty
-            elif "sale" in label or "sell" in label:
-                sells += qty
-        if buys == 0 and sells == 0:
-            return None, "No classified insider trades in last 6mo"
-        if sells == 0:
-            return 3.0, f"Insider buy/sell ratio {buys:.0f}:{sells:.0f} (6mo)"
-        ratio = buys / sells
-        return ratio, f"Insider buy/sell ratio {ratio:.2f} (6mo)"
+        insider_df = ticker.insider_transactions
+        if insider_df is None or insider_df.empty:
+            insider_ratio = None
+            insider_data_note = "No insider transaction data available"
+        else:
+            # Check data recency — only use transactions from last 6 months
+            cutoff_date = pd.Timestamp.now() - pd.DateOffset(months=6)
+            
+            # Handle both 'Date' and 'Start Date' column names in yfinance
+            date_col = 'Date' if 'Date' in insider_df.columns else 'Start Date'
+            
+            if date_col in insider_df.columns:
+                insider_df[date_col] = pd.to_datetime(
+                    insider_df[date_col], errors='coerce'
+                )
+                recent = insider_df[insider_df[date_col] >= cutoff_date]
+            else:
+                recent = insider_df  # use all if no date column found
+
+            if recent.empty:
+                insider_ratio = None
+                insider_data_note = "No recent insider transactions (6mo)"
+            else:
+                buy_vol = recent[recent.get('Transaction', 
+                          recent.get('Shares', pd.Series())) > 0][
+                          'Shares'].sum() if 'Shares' in recent.columns else 0
+                sell_vol = abs(recent[recent.get('Shares', 
+                            pd.Series()) < 0]['Shares'].sum()) if 'Shares' in recent.columns else 0
+                total_vol = buy_vol + sell_vol
+                
+                if total_vol == 0:
+                    insider_ratio = None
+                    insider_data_note = "Insufficient insider transaction volume"
+                else:
+                    insider_ratio = buy_vol / total_vol
+                    insider_data_note = (
+                        f"Based on {len(recent)} transactions "
+                        f"(last 6 months)"
+                    )
+        return insider_ratio, insider_data_note
     except Exception:
-        return None, "Insider activity unavailable"
+        return None, "Insider data unavailable"
 
 
 def _gross_margin_trend(ticker: yf.Ticker, info: dict) -> tuple[float | None, str]:
@@ -1900,13 +1918,313 @@ def _gross_margin_trend(ticker: yf.Ticker, info: dict) -> tuple[float | None, st
     return None, "Gross margin trend unavailable"
 
 
+def _piotroski_f_score_lite(ticker: yf.Ticker, info: dict) -> tuple[int, str]:
+    """
+    Calculate simplified Piotroski F-Score (max 6 points).
+    Skips share-issuance check (less relevant for NSE small/midcaps with QIPs).
+    
+    Criteria:
+    1. ROA improving YoY → +1
+    2. Operating Cash Flow positive → +1
+    3. OCF/Total Assets > Net Income/Total Assets (accrual quality) → +1
+    4. Long-term Debt/Equity decreasing YoY → +1
+    5. Current Ratio improving YoY → +1
+    6. Gross Margin improving YoY → +1
+    """
+    score = 0
+    criteria_met = []
+    criteria_unavailable = []
+    
+    try:
+        # Get financial statements
+        financials = ticker.financials
+        balance_sheet = ticker.balance_sheet
+        cash_flow = ticker.cash_flow
+        
+        if financials is None or financials.empty:
+            return 0, "Financial data unavailable"
+        
+        # Convert to numeric and sort
+        financials = financials.apply(pd.to_numeric, errors='coerce')
+        balance_sheet = balance_sheet.apply(pd.to_numeric, errors='coerce') if balance_sheet is not None else None
+        cash_flow = cash_flow.apply(pd.to_numeric, errors='coerce') if cash_flow is not None else None
+        
+        # Criterion 1: ROA improving YoY
+        net_income_row = next((financials.loc[r] for r in financials.index if "Net Income" in str(r)), None)
+        total_assets_row = next((balance_sheet.loc[r] for r in balance_sheet.index if "Total Assets" in str(r)), None) if balance_sheet else None
+        
+        if net_income_row is not None and total_assets_row is not None and len(total_assets_row) >= 2:
+            ni_current = float(net_income_row.iloc[-1])
+            ni_prior = float(net_income_row.iloc[0])
+            assets_current = float(total_assets_row.iloc[-1])
+            assets_prior = float(total_assets_row.iloc[0])
+            
+            if assets_current > 0 and assets_prior > 0:
+                roa_current = ni_current / assets_current
+                roa_prior = ni_prior / assets_prior
+                if roa_current > roa_prior:
+                    score += 1
+                    criteria_met.append("ROA improving")
+        else:
+            criteria_unavailable.append("ROA trend")
+        
+        # Criterion 2: Operating Cash Flow positive
+        ocf_row = next((cash_flow.loc[r] for r in cash_flow.index if "Operating Cash Flow" in str(r)), None) if cash_flow else None
+        if ocf_row is not None:
+            ocf_current = float(ocf_row.iloc[-1])
+            if ocf_current > 0:
+                score += 1
+                criteria_met.append("Positive OCF")
+        else:
+            criteria_unavailable.append("OCF positivity")
+        
+        # Criterion 3: Accrual quality (OCF/Assets > Net Income/Assets)
+        if ocf_row is not None and total_assets_row is not None:
+            ocf_current = float(ocf_row.iloc[-1])
+            assets_current = float(total_assets_row.iloc[-1])
+            if assets_current > 0:
+                ocf_to_assets = ocf_current / assets_current
+                ni_to_assets = ni_current / assets_current if ni_current else 0
+                if ocf_to_assets > ni_to_assets:
+                    score += 1
+                    criteria_met.append("Accrual quality")
+        else:
+            criteria_unavailable.append("Accrual quality")
+        
+        # Criterion 4: Long-term Debt/Equity decreasing YoY
+        debt_row = next((balance_sheet.loc[r] for r in balance_sheet.index if "Total Debt" in str(r) or "Long Term Debt" in str(r)), None) if balance_sheet else None
+        equity_row = next((balance_sheet.loc[r] for r in balance_sheet.index if "Total Equity" in str(r) or "Stockholder Equity" in str(r)), None) if balance_sheet else None
+        
+        if debt_row is not None and equity_row is not None and len(debt_row) >= 2:
+            debt_current = float(debt_row.iloc[-1])
+            debt_prior = float(debt_row.iloc[0])
+            equity_current = float(equity_row.iloc[-1])
+            equity_prior = float(equity_row.iloc[0])
+            
+            if equity_current > 0 and equity_prior > 0:
+                de_current = debt_current / equity_current
+                de_prior = debt_prior / equity_prior
+                if de_current < de_prior:
+                    score += 1
+                    criteria_met.append("Debt/Equity decreasing")
+        else:
+            criteria_unavailable.append("Debt trend")
+        
+        # Criterion 5: Current Ratio improving YoY
+        current_assets_row = next((balance_sheet.loc[r] for r in balance_sheet.index if "Current Assets" in str(r)), None) if balance_sheet else None
+        current_liab_row = next((balance_sheet.loc[r] for r in balance_sheet.index if "Current Liabilities" in str(r)), None) if balance_sheet else None
+        
+        if current_assets_row is not None and current_liab_row is not None and len(current_assets_row) >= 2:
+            ca_current = float(current_assets_row.iloc[-1])
+            ca_prior = float(current_assets_row.iloc[0])
+            cl_current = float(current_liab_row.iloc[-1])
+            cl_prior = float(current_liab_row.iloc[0])
+            
+            if cl_current > 0 and cl_prior > 0:
+                cr_current = ca_current / cl_current
+                cr_prior = ca_prior / cl_prior
+                if cr_current > cr_prior:
+                    score += 1
+                    criteria_met.append("Current ratio improving")
+        else:
+            criteria_unavailable.append("Current ratio trend")
+        
+        # Criterion 6: Gross Margin improving YoY
+        gp_row = next((financials.loc[r] for r in financials.index if "Gross Profit" in str(r)), None)
+        rev_row = next((financials.loc[r] for r in financials.index if "Revenue" in str(r)), None)
+        
+        if gp_row is not None and rev_row is not None and len(gp_row) >= 2:
+            gp_current = float(gp_row.iloc[-1])
+            gp_prior = float(gp_row.iloc[0])
+            rev_current = float(rev_row.iloc[-1])
+            rev_prior = float(rev_row.iloc[0])
+            
+            if rev_current > 0 and rev_prior > 0:
+                gm_current = gp_current / rev_current
+                gm_prior = gp_prior / rev_prior
+                if gm_current > gm_prior:
+                    score += 1
+                    criteria_met.append("Gross margin improving")
+        else:
+            criteria_unavailable.append("Gross margin trend")
+        
+        detail = f"{score}/6 criteria met"
+        if criteria_unavailable:
+            detail += f" ({len(criteria_unavailable)} unavailable)"
+        
+    except Exception as e:
+        return 0, f"F-Score calculation error: {str(e)}"
+    
+    return score, detail
+
+
+def _promoter_holding_trend(ticker: yf.Ticker, info: dict) -> tuple[float, str]:
+    """
+    Calculate promoter holding trend score (max 4 points).
+    Based on quarter-over-quarter change in promoter shareholding.
+    
+    Scoring:
+    - >1.0% increase: +4.0 (meaningfully increasing)
+    - >0% increase: +2.0 (slightly increasing)
+    - 0% change: +1.0 (stable)
+    - >-2.0% decrease: 0.0 (mild decrease, neutral)
+    - <=-2.0% decrease: -2.0 (meaningful selling, red flag)
+    """
+    try:
+        # Get current promoter holding
+        current_promoter = _safe_float(info.get("heldPercentInsiders"))
+        
+        # Try to get historical data for prior quarter
+        # yfinance doesn't provide quarterly promoter history, so we'll use a proxy
+        # For now, if we can't get historical data, return 0 (neutral)
+        
+        if current_promoter is None:
+            return 0.0, "Promoter holding data unavailable"
+        
+        # Since yfinance doesn't provide quarterly promoter history for NSE stocks,
+        # we'll need to skip this component for now
+        # In a production system, this would come from a dedicated NSE data source
+        return 0.0, "Promoter trend data unavailable (requires NSE quarterly filings)"
+        
+    except Exception as e:
+        return 0.0, f"Promoter trend calculation error: {str(e)}"
+
+
+def _interest_coverage_ratio(ticker: yf.Ticker, info: dict) -> tuple[float, str]:
+    """
+    Calculate interest coverage ratio score (max 3 points).
+    Tests whether the company can service its debt from operating earnings.
+    
+    Formula: interest_coverage = ebit / interest_expense
+    
+    Scoring:
+    - No/negligible debt: +3.0
+    - ICR >= 8: +3.0
+    - ICR >= 3: 1.0 + ((ICR - 3) / 5) * 2.0
+    - ICR >= 1.5: +1.0
+    - ICR < 1.5: -3.0 (red flag)
+    """
+    try:
+        ebit = _safe_float(info.get("operatingIncome"))
+        interest_expense = _safe_float(info.get("interestExpense"))
+        
+        if not interest_expense or interest_expense <= 0:
+            return 3.0, "No/negligible debt interest"
+        
+        if ebit is None or ebit <= 0:
+            return -3.0, "Negative or zero EBIT"
+        
+        icr = ebit / interest_expense
+        
+        if icr >= 8:
+            score = 3.0
+        elif icr >= 3:
+            score = 1.0 + ((icr - 3) / 5) * 2.0
+        elif icr >= 1.5:
+            score = 1.0
+        else:
+            score = -3.0
+        
+        detail = f"Interest Coverage {icr:.2f}x"
+        
+    except Exception as e:
+        return 0.0, f"ICR calculation error: {str(e)}"
+    
+    return score, detail
+
+
+# Catalyst persistence - Added 21 Jun 2026
+CATALYST_FILE = Path("catalyst_data.json")
+
+def load_catalyst_data():
+    """Load catalyst data from JSON file."""
+    if CATALYST_FILE.exists():
+        try:
+            with open(CATALYST_FILE, 'r') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_catalyst_data(data):
+    """Save catalyst data to JSON file."""
+    try:
+        with open(CATALYST_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass  # Silent fail — don't crash the app over persistence
+
+
+# Catalyst scoring - Added 21 Jun 2026
+CATALYST_TYPE_SCORE = {
+    "CAPEX_COMMISSION":  10,  # New plant/capacity going live
+    "DEMERGER_SPINOFF":  10,  # Corporate restructuring
+    "DIVESTMENT":        10,  # Government stake sale
+    "POLICY_TAILWIND":    8,  # PLI, budget, regulation
+    "DEBT_REDUCTION":     7,  # Deleveraging milestone
+    "MANAGEMENT_CHANGE":  6,  # New CEO or promoter action
+    "SECTOR_RERATING":    6,  # Sector PE re-rating in progress
+    "EARNINGS_RECOVERY":  8,  # Multi-quarter earnings turnaround
+    "NONE_IDENTIFIED":    0,  # Honest — no catalyst found
+}
+
+CATALYST_TIMELINE_MULTIPLIER = {
+    "0-6mo":   1.0,   # Imminent — full score
+    "6-12mo":  0.8,   # Near-term — 80% score
+    "12-24mo": 0.5,   # Medium-term — 50% score
+    "24mo+":   0.2,   # Long-term — 20% score
+}
+
+def calculate_catalyst_score(ticker: str) -> tuple[float, str]:
+    """
+    Returns catalyst_score (0-10) and catalyst_label string.
+    Returns (0, "⚪ Not Tagged") if not yet tagged by user.
+    """
+    data = st.session_state.get('catalyst_data', {}).get(ticker)
+    
+    if not data:
+        return 0, "⚪ Not Tagged"
+    
+    cat_type     = data.get('type', 'NONE_IDENTIFIED')
+    cat_timeline = data.get('timeline', '12-24mo')
+    
+    base_score   = CATALYST_TYPE_SCORE.get(cat_type, 0)
+    multiplier   = CATALYST_TIMELINE_MULTIPLIER.get(cat_timeline, 0.5)
+    final_score  = round(base_score * multiplier, 1)
+    
+    # Human-readable label
+    type_labels = {
+        "CAPEX_COMMISSION":  "New Capacity",
+        "DEMERGER_SPINOFF":  "Demerger/Spinoff",
+        "DIVESTMENT":        "Divestment",
+        "POLICY_TAILWIND":   "Policy Tailwind",
+        "DEBT_REDUCTION":    "Debt Reduction",
+        "MANAGEMENT_CHANGE": "Management Change",
+        "SECTOR_RERATING":   "Sector Re-rating",
+        "EARNINGS_RECOVERY": "Earnings Recovery",
+        "NONE_IDENTIFIED":   "No Catalyst",
+    }
+    label = (f"🎯 {type_labels.get(cat_type, cat_type)} "
+             f"({cat_timeline})")
+    
+    return final_score, label
+
+
 def compute_dark_horse_score(sym: str, info: dict, ticker: yf.Ticker) -> dict:
     """New 4-category Dark Horse scoring system as per requirements."""
     
     # Get fundamental metrics
     pe = _safe_float(info.get("trailingPE") or info.get("forwardPE"))
     pb = _safe_float(info.get("priceToBook"))
-    debt_to_equity = _safe_float(info.get("debtToEquity"))
+    
+    # FIX 1.7: yfinance returns debtToEquity as percentage for many NSE stocks
+    # e.g. 67.3 meaning 0.673x D/E ratio, not 67.3x
+    raw_de = _safe_float(info.get("debtToEquity"))
+    if raw_de is not None and raw_de > 10:
+        debt_to_equity = raw_de / 100
+    else:
+        debt_to_equity = raw_de
+    
     roe = _safe_float(info.get("returnOnEquity"))
     if roe and abs(roe) <= 1:
         roe *= 100
@@ -1940,51 +2258,53 @@ def compute_dark_horse_score(sym: str, info: dict, ticker: yf.Ticker) -> dict:
     value_details = {}
     
     # PE ratio vs sector median → 12 pts
-    if pe is not None:
-        pe_discount_pct = ((sector_median_pe - pe) / sector_median_pe) * 100
-        if pe_discount_pct >= 20:
-            pe_vs_sector_score = 12.0
-        elif pe_discount_pct <= 0:
-            pe_vs_sector_score = 0.0
-        else:
-            pe_vs_sector_score = (pe_discount_pct / 20) * 12
-        pe_vs_sector_score = max(0.0, min(12.0, pe_vs_sector_score))
-        value_details["pe_vs_sector"] = {"score": pe_vs_sector_score, "max": 12, "detail": f"PE {pe:.1f} vs median {sector_median_pe} ({pe_discount_pct:+.1f}%)"}
-    else:
+    # FIX 1.1: Guard: skip PE scoring if data invalid or stock is loss-making
+    if (not sector_median_pe or sector_median_pe <= 0 or 
+        not pe or pe <= 0):
         pe_vs_sector_score = 0.0
-        value_details["pe_vs_sector"] = {"score": 0.0, "max": 12, "detail": "PE unavailable"}
+        value_details["pe_vs_sector"] = {"score": 0.0, "max": 12, "detail": "PE unavailable or negative"}
+    else:
+        pe_discount_pct = ((sector_median_pe - pe) / sector_median_pe) * 100
+        pe_vs_sector_score = min(12.0, max(0.0, (pe_discount_pct / 20) * 12))
+        value_details["pe_vs_sector"] = {"score": pe_vs_sector_score, "max": 12, "detail": f"PE {pe:.1f} vs median {sector_median_pe} ({pe_discount_pct:+.1f}%)"}
     value_score += pe_vs_sector_score
     
     # PB ratio → 8 pts
-    if pb is not None:
-        if pb < 2:
-            pb_score = 8.0
-        elif pb > 5:
-            pb_score = 0.0
-        else:
-            pb_score = 8.0 * ((5 - pb) / 3)
-        pb_score = max(0.0, min(8.0, pb_score))
-        value_details["pb_ratio"] = {"score": pb_score, "max": 8, "detail": f"PB {pb:.2f}"}
+    # FIX 1.2: Widen upper band for high-ROE businesses
+    # FIX 21 Jun 2026: Fix boundary inversion at PB=5.0
+    if not pb or pb <= 0:
+        pb_score = 0.0
+    elif pb < 2:
+        pb_score = 8.0
+    elif pb <= 5:
+        # Linear taper from 8.0 down to 3.2 (matching where band 2 starts)
+        pb_score = 8.0 - ((pb - 2) / 3) * 4.8
+    elif pb <= 8:
+        # Continues the taper from 3.2 down to 0
+        pb_score = 3.2 * ((8 - pb) / 3)
     else:
         pb_score = 0.0
-        value_details["pb_ratio"] = {"score": 0.0, "max": 8, "detail": "PB unavailable"}
+    pb_score = min(8.0, max(0.0, pb_score))
+    value_details["pb_ratio"] = {"score": pb_score, "max": 8, "detail": f"PB {pb:.2f}"}
     value_score += pb_score
     
     # Price vs 200 DMA → 8 pts
-    if dma_200 and current_price:
+    # FIX 1.3: Cap scoring benefit at 25% below DMA
+    if dma_200 and dma_200 > 0:
         price_vs_200dma_pct = ((dma_200 - current_price) / dma_200) * 100
-        if price_vs_200dma_pct >= 10:
-            price_vs_200dma_score = 8.0
-        elif price_vs_200dma_pct <= 0:
-            price_vs_200dma_score = 0.0
-        else:
-            price_vs_200dma_score = (price_vs_200dma_pct / 10) * 8
-        price_vs_200dma_score = max(0.0, min(8.0, price_vs_200dma_score))
-        value_details["price_vs_200dma"] = {"score": price_vs_200dma_score, "max": 8, "detail": f"Price {price_vs_200dma_pct:+.1f}% vs 200DMA"}
+        price_vs_200dma_pct = min(price_vs_200dma_pct, 25.0)  # cap at 25%
     else:
-        price_vs_200dma_score = 0.0
-        value_details["price_vs_200dma"] = {"score": 0.0, "max": 8, "detail": "200DMA unavailable"}
-    value_score += price_vs_200dma_score
+        price_vs_200dma_pct = 0.0
+
+    if price_vs_200dma_pct >= 10:
+        dma200_score = 8.0
+    elif price_vs_200dma_pct <= 0:
+        dma200_score = 0.0
+    else:
+        dma200_score = (price_vs_200dma_pct / 10) * 8
+    dma200_score = min(8.0, max(0.0, dma200_score))
+    value_details["price_vs_200dma"] = {"score": dma200_score, "max": 8, "detail": f"Price {price_vs_200dma_pct:+.1f}% vs 200DMA"}
+    value_score += dma200_score
     
     # Price vs 52-week high → 15 pts (increased from 7 to penalize stocks near highs more heavily)
     if week_52_high and current_price:
@@ -2007,53 +2327,61 @@ def compute_dark_horse_score(sym: str, info: dict, ticker: yf.Ticker) -> dict:
     fundamentals_details = {}
     
     # ROE → 15 pts
-    if roe is not None:
-        if roe > 25:
-            roe_score = 15.0
-        elif roe >= 15:
-            roe_score = 10.0
-        elif roe >= 10:
-            roe_score = 5.0
-        else:
-            roe_score = 0.0
-        fundamentals_details["roe"] = {"score": roe_score, "max": 15, "detail": f"ROE {roe:.1f}%"}
+    # FIX 1.4: Replace step function with linear interpolation
+    if not roe or roe is None:
+        roe_score = 0.0
+    elif roe >= 25:
+        roe_score = 15.0
+    elif roe >= 10:
+        # Linear interpolation between 10% ROE (5 pts) and 25% ROE (15 pts)
+        roe_score = 5.0 + ((roe - 10) / 15) * 10
     else:
         roe_score = 0.0
-        fundamentals_details["roe"] = {"score": 0.0, "max": 15, "detail": "ROE unavailable"}
+    roe_score = min(15.0, max(0.0, roe_score))
+    fundamentals_details["roe"] = {"score": roe_score, "max": 15, "detail": f"ROE {roe:.1f}%"}
     fundamentals_score += roe_score
     
     # ROCE → 10 pts
-    if roce is not None:
-        if roce > 20:
-            roce_score = 10.0
-        elif roce >= 15:
-            roce_score = 7.0
-        elif roce >= 10:
-            roce_score = 4.0
-        else:
-            roce_score = 0.0
-        fundamentals_details["roce"] = {"score": roce_score, "max": 10, "detail": f"ROCE {roce:.1f}%"}
+    # FIX 1.5: Same cliff-edge fix as ROE - linear interpolation
+    if not roce or roce is None:
+        roce_score = 0.0
+    elif roce >= 20:
+        roce_score = 10.0
+    elif roce >= 10:
+        # Linear interpolation between 10% ROCE (4 pts) and 20% ROCE (10 pts)
+        roce_score = 4.0 + ((roce - 10) / 10) * 6
     else:
         roce_score = 0.0
-        fundamentals_details["roce"] = {"score": 0.0, "max": 10, "detail": "ROCE unavailable"}
+    roce_score = min(10.0, max(0.0, roce_score))
+    fundamentals_details["roce"] = {"score": roce_score, "max": 10, "detail": f"ROCE {roce:.1f}%"}
     fundamentals_score += roce_score
     
-    # OCF Score → 10 pts (normalize from 25 to 10)
-    ocf_raw_score = 0.0
-    if ocf and mcap and mcap > 0:
-        ocf_yield = ocf / mcap
-        ocf_ratio_score = max(0.0, min(5.0, ocf_yield * 100))
-        ocf_raw_score += ocf_ratio_score * 5  # Scale to 25
-    if ocf and ocf > 0:
-        ocf_raw_score += 10  # Positive OCF bonus
-    if ocf and mcap and mcap > 0:
-        net_income = _safe_float(info.get("netIncomeToCommon"))
-        if net_income and ocf > net_income:
-            ocf_raw_score += 10  # OCF > net income bonus
-    ocf_normalized_score = (ocf_raw_score / 25) * 10 if ocf_raw_score > 0 else 0.0
-    ocf_normalized_score = max(0.0, min(10.0, ocf_normalized_score))
-    fundamentals_details["ocf"] = {"score": ocf_normalized_score, "max": 10, "detail": f"OCF yield {(ocf/mcap*100 if ocf and mcap else 0):.2f}%"}
-    fundamentals_score += ocf_normalized_score
+    # OCF Score → 10 pts (normalize from 45 to 10)
+    # FIX 1.6: Fix normalisation denominator bug - true maximum is 45, not 25
+    if not ocf or not mcap or mcap <= 0:
+        ocf_score = 0.0
+    else:
+        # Only score positive OCF stocks
+        if ocf <= 0:
+            ocf_score = 0.0
+        else:
+            ocf_yield = ocf / mcap
+            ocf_ratio_score = max(0.0, min(5.0, ocf_yield * 100))
+            ocf_raw_score = ocf_ratio_score * 5   # max = 25
+
+            # Positive OCF bonus (only for positive OCF — already confirmed above)
+            ocf_raw_score += 10                    # max = 35
+
+            # Quality bonus: OCF exceeds reported net income
+            net_income = _safe_float(info.get("netIncomeToCommon"))
+            if net_income and ocf > net_income:
+                ocf_raw_score += 10               # max = 45
+
+            # FIX: normalise over 45 (true maximum), not 25 (wrong)
+            ocf_score = min(10.0, max(0.0, (ocf_raw_score / 45) * 10))
+    
+    fundamentals_details["ocf"] = {"score": ocf_score, "max": 10, "detail": f"OCF yield {(ocf/mcap*100 if ocf and mcap else 0):.2f}%"}
+    fundamentals_score += ocf_score
     
     # Debt/Equity → 5 pts
     if debt_to_equity is not None:
@@ -2076,22 +2404,54 @@ def compute_dark_horse_score(sym: str, info: dict, ticker: yf.Ticker) -> dict:
     momentum_details = {}
     
     # Price vs 50 DMA → 8 pts
-    if dma_50 and current_price:
-        if current_price > dma_50:
-            price_vs_50dma_score = 8.0
-        else:
-            price_vs_50dma_score = 0.0
-        momentum_details["price_vs_50dma"] = {"score": price_vs_50dma_score, "max": 8, "detail": f"Price {'above' if current_price > dma_50 else 'below'} 50DMA"}
+    # FIX 1.8: Replace binary with graduated scoring
+    if not dma_50 or dma_50 <= 0:
+        dma50_score = 0.0
     else:
-        price_vs_50dma_score = 0.0
-        momentum_details["price_vs_50dma"] = {"score": 0.0, "max": 8, "detail": "50DMA unavailable"}
-    momentum_score += price_vs_50dma_score
+        diff_pct = ((current_price - dma_50) / dma_50) * 100
+        
+        if diff_pct >= 0:
+            # Price above 50 DMA — momentum confirmed
+            dma50_score = 8.0
+        elif diff_pct >= -5:
+            # Price just below 50 DMA — recovering dark horse sweet spot
+            dma50_score = 6.0
+        elif diff_pct >= -15:
+            # Price moderately below 50 DMA — some weakness but recoverable
+            dma50_score = 3.0
+        else:
+            # Price >15% below 50 DMA — downtrend, not a recovery
+            dma50_score = 0.0
     
-    # Existing Dark Horse score → 7 pts (use fundamentals as proxy)
-    # Since we're rebuilding the system, use fundamentals quality as proxy
-    dh_proxy_score = (roe_score / 15) * 3 + (roce_score / 10) * 2 + (price_vs_50dma_score / 8) * 2
-    dh_proxy_score = max(0.0, min(7.0, dh_proxy_score))
-    momentum_details["dark_horse_proxy"] = {"score": dh_proxy_score, "max": 7, "detail": "Quality proxy"}
+    momentum_details["price_vs_50dma"] = {"score": dma50_score, "max": 8, "detail": f"Price {diff_pct:+.1f}% vs 50DMA" if dma_50 else "50DMA unavailable"}
+    momentum_score += dma50_score
+    
+    # Dark Horse Quality Proxy → 7 pts
+    # FIX 1.9: Replace double-counting formula with revenue growth momentum
+    # Previous formula double-counted ROE, ROCE, and 50DMA — all already scored in their own categories
+    
+    # Get revenue CAGR (reuse from earlier calculation if available, or calculate fresh)
+    revenue_cagr_3yr, _ = _revenue_cagr_3y(ticker, info)
+    
+    if revenue_cagr_3yr is not None:
+        if revenue_cagr_3yr >= 15:
+            dh_proxy_score = 7.0
+        elif revenue_cagr_3yr >= 8:
+            dh_proxy_score = 4.0 + ((revenue_cagr_3yr - 8) / 7) * 3
+        elif revenue_cagr_3yr >= 0:
+            dh_proxy_score = (revenue_cagr_3yr / 8) * 4
+        else:
+            dh_proxy_score = 0.0
+    else:
+        # Fallback if revenue CAGR not available: use FCF yield signal
+        fcf_yield = _fcf_yield_from_info(info)
+        if fcf_yield is not None and fcf_yield > 0:
+            dh_proxy_score = min(7.0, fcf_yield * 100 * 1.4)
+        else:
+            dh_proxy_score = 0.0
+    
+    dh_proxy_score = min(7.0, max(0.0, dh_proxy_score))
+    momentum_details["dark_horse_proxy"] = {"score": dh_proxy_score, "max": 7, "detail": f"Revenue CAGR {revenue_cagr_3yr:.1f}%" if revenue_cagr_3yr else "FCF yield proxy"}
     momentum_score += dh_proxy_score
     
     # CATEGORY 4 — RISK PENALTY (subtract up to 15 pts - increased from 10)
@@ -2120,11 +2480,62 @@ def compute_dark_horse_score(sym: str, info: dict, ticker: yf.Ticker) -> dict:
         risk_penalty -= 2.0
         risk_flags.append("Low ROCE (<10%)")
     
-    risk_penalty = max(-15.0, risk_penalty)  # Cap at -15
+    # Revenue decline penalty - Added 21 Jun 2026
+    # Graded penalties based on severity of revenue decline
+    if revenue_cagr_3yr is not None and revenue_cagr_3yr < 0:
+        if revenue_cagr_3yr <= -15:
+            risk_penalty -= 7.0
+            risk_flags.append(f"Severe revenue decline ({revenue_cagr_3yr:.1f}% CAGR)")
+        elif revenue_cagr_3yr <= -8:
+            risk_penalty -= 4.0
+            risk_flags.append(f"Revenue decline ({revenue_cagr_3yr:.1f}% CAGR)")
+        elif revenue_cagr_3yr <= -3:
+            risk_penalty -= 2.0
+            risk_flags.append(f"Revenue decline ({revenue_cagr_3yr:.1f}% CAGR)")
+        # Mild decline (< -3%) is acceptable for cyclical businesses
     
-    # Total score
-    total_score = value_score + fundamentals_score + momentum_score + risk_penalty
-    total_score = max(0.0, min(100.0, total_score))
+    risk_penalty = max(-22.0, risk_penalty)  # Cap at -22 (was -15, extended for revenue penalty)
+    
+    # Catalyst score: max 10 points — Category 5
+    # Added 21 Jun 2026
+    catalyst_score, catalyst_label = calculate_catalyst_score(sym)
+    
+    # Total score (now out of 110 with catalyst)
+    total_score = (value_score + fundamentals_score + momentum_score 
+                   + risk_penalty + catalyst_score)
+    
+    # Total is now out of 110 — normalise back to 100
+    # This preserves backward compatibility with existing tier thresholds
+    total_score = min(100.0, max(0.0, (total_score / 110) * 100))
+    
+    # QUALITY & CONVICTION BONUS (NEW - added on top of 100-point score)
+    # Added 21 Jun 2026
+    f_score_lite, f_score_detail = _piotroski_f_score_lite(ticker, info)
+    promoter_trend_score, promoter_trend_detail = _promoter_holding_trend(ticker, info)
+    icr_score, icr_detail = _interest_coverage_ratio(ticker, info)
+    
+    # Count available components (exclude unavailable ones)
+    components_available = 0
+    components_total = 3
+    
+    if "unavailable" not in f_score_detail.lower():
+        components_available += 1
+    if "unavailable" not in promoter_trend_detail.lower():
+        components_available += 1
+    if "unavailable" not in icr_detail.lower():
+        components_available += 1
+    
+    # Only show bonus if at least 50% of components are available
+    if components_available >= (components_total / 2):
+        quality_bonus = f_score_lite + promoter_trend_score + icr_score
+        quality_bonus_detail = {
+            "f_score_lite": {"score": f_score_lite, "detail": f_score_detail},
+            "promoter_trend": {"score": promoter_trend_score, "detail": promoter_trend_detail},
+            "interest_coverage": {"score": icr_score, "detail": icr_detail},
+        }
+    else:
+        quality_bonus = None
+        quality_bonus_detail = None
     
     # Determine tier
     if total_score >= 75:
@@ -2145,6 +2556,11 @@ def compute_dark_horse_score(sym: str, info: dict, ticker: yf.Ticker) -> dict:
         "fundamentals_details": fundamentals_details,
         "momentum_details": momentum_details,
         "risk_flags": risk_flags,
+        "quality_bonus": quality_bonus,
+        "quality_bonus_detail": quality_bonus_detail,
+        "catalyst_score": catalyst_score,
+        "catalyst_label": catalyst_label,
+        "revenue_cagr_3yr": revenue_cagr_3yr,
     }
 
 
@@ -2278,9 +2694,9 @@ SECTOR_STOCKS = {
 }
 
 
-@st.cache_data(ttl=60)  # Cache for 1 minute to ensure fresh prices on refresh
+@st.cache_data(ttl=900)  # FIX 8.1: Cache for 15 minutes to reduce yfinance API load
 def fetch_sector_stocks_data() -> dict:
-    """Fetch and cache sector stocks data for 1 minute."""
+    """Fetch and cache sector stocks data for 15 minutes."""
     sector_data_dict = {}
     for sector, stocks in SECTOR_STOCKS.items():
         sector_data = []
@@ -2484,6 +2900,115 @@ def fetch_stock_data(symbol: str) -> dict:
         except Exception:
             hist = pd.DataFrame()
 
+        # Volume data — use existing hist DataFrame (already fetched)
+        # Added 21 Jun 2026 for Volume Confirmation Signal
+        try:
+            if hist is not None and len(hist) >= 20:
+                # Average volume over last 20 trading days
+                avg_volume_20d = hist['Volume'].tail(20).mean()
+                
+                # Today's (most recent) volume and price change
+                latest = hist.iloc[-1]
+                prev   = hist.iloc[-2]
+                
+                current_volume   = latest['Volume']
+                price_change_pct = ((latest['Close'] - prev['Close']) 
+                                    / prev['Close']) * 100
+                
+                # Volume ratio vs 20-day average
+                volume_ratio = (current_volume / avg_volume_20d 
+                               if avg_volume_20d > 0 else 1.0)
+                
+                # On-Balance Volume (OBV) — last 20 days
+                # OBV adds volume on up days, subtracts on down days
+                obv = 0
+                for i in range(1, min(20, len(hist))):
+                    day_close = hist['Close'].iloc[-i]
+                    prev_close = hist['Close'].iloc[-(i+1)]
+                    day_vol   = hist['Volume'].iloc[-i]
+                    if day_close > prev_close:
+                        obv += day_vol
+                    elif day_close < prev_close:
+                        obv -= day_vol
+                
+                # OBV trend: compare last 5-day OBV vs prior 5-day OBV
+                obv_recent = 0
+                obv_prior  = 0
+                for i in range(1, 6):
+                    day_close  = hist['Close'].iloc[-i]
+                    prev_close = hist['Close'].iloc[-(i+1)]
+                    day_vol    = hist['Volume'].iloc[-i]
+                    if day_close > prev_close:
+                        obv_recent += day_vol
+                    elif day_close < prev_close:
+                        obv_recent -= day_vol
+                for i in range(6, 11):
+                    day_close  = hist['Close'].iloc[-i]
+                    prev_close = hist['Close'].iloc[-(i+1)]
+                    day_vol    = hist['Volume'].iloc[-i]
+                    if day_close > prev_close:
+                        obv_prior += day_vol
+                    elif day_close < prev_close:
+                        obv_prior -= day_vol
+                
+                obv_trend = "RISING" if obv_recent > obv_prior else "FALLING"
+            else:
+                avg_volume_20d = None
+                current_volume = None
+                volume_ratio   = None
+                price_change_pct = None
+                obv_trend      = None
+        except Exception:
+            avg_volume_20d = None
+            current_volume = None
+            volume_ratio   = None
+            price_change_pct = None
+            obv_trend      = None
+
+        # Volume signal classification
+        # Added 21 Jun 2026 for Volume Confirmation Signal
+        if volume_ratio is None or price_change_pct is None:
+            volume_signal       = "INSUFFICIENT DATA"
+            volume_signal_color = "gray"
+            volume_signal_note  = "Volume data unavailable"
+        elif price_change_pct > 0 and volume_ratio >= 2.0:
+            volume_signal       = "STRONG ACCUMULATION"
+            volume_signal_color = "green"
+            volume_signal_note  = (f"Price up {price_change_pct:.1f}% on "
+                                   f"{volume_ratio:.1f}x normal volume — "
+                                   f"strong buying interest")
+        elif price_change_pct > 0 and volume_ratio >= 1.5:
+            volume_signal       = "ACCUMULATION"
+            volume_signal_color = "green"
+            volume_signal_note  = (f"Price up {price_change_pct:.1f}% on "
+                                   f"{volume_ratio:.1f}x normal volume")
+        elif price_change_pct < 0 and volume_ratio >= 2.0:
+            volume_signal       = "STRONG DISTRIBUTION"
+            volume_signal_color = "red"
+            volume_signal_note  = (f"Price down {abs(price_change_pct):.1f}% "
+                                   f"on {volume_ratio:.1f}x normal volume — "
+                                   f"significant selling pressure, wait")
+        elif price_change_pct < 0 and volume_ratio >= 1.5:
+            volume_signal       = "DISTRIBUTION"
+            volume_signal_color = "red"
+            volume_signal_note  = (f"Price down {abs(price_change_pct):.1f}% "
+                                   f"on {volume_ratio:.1f}x volume — "
+                                   f"selling pressure present")
+        elif volume_ratio < 0.5:
+            volume_signal       = "INACTIVE"
+            volume_signal_color = "gray"
+            volume_signal_note  = (f"Volume at {volume_ratio:.1f}x average — "
+                                   f"no meaningful activity")
+        else:
+            volume_signal       = "NEUTRAL"
+            volume_signal_color = "gray"
+            volume_signal_note  = (f"Volume at {volume_ratio:.1f}x average — "
+                                   f"no clear directional signal")
+        
+        # Append OBV trend context to note
+        if obv_trend and volume_signal not in ["INSUFFICIENT DATA", "NEUTRAL"]:
+            volume_signal_note += f" | OBV trend: {obv_trend}"
+
         try:
             raw_news = ticker.news or []
         except Exception:
@@ -2550,6 +3075,9 @@ def fetch_stock_data(symbol: str) -> dict:
                     info.get("volume") or _mapping_get(fast, "last_volume", default=None)
                 ),
                 "avg_volume": _safe_float(info.get("averageVolume")),
+                "volume_signal": volume_signal,
+                "volume_signal_color": volume_signal_color,
+                "volume_signal_note": volume_signal_note,
                 "market_cap": _safe_float(info.get("marketCap")),
                 "pe_ratio": _safe_float(info.get("trailingPE") or info.get("forwardPE")),
                 "eps": _safe_float(
@@ -2595,6 +3123,12 @@ if "scanner_results" not in st.session_state:
         st.session_state["scanner_results"] = []
         st.session_state["scanner_skipped"] = 0
         st.session_state["scanner_timestamp"] = ""
+
+# Initialize catalyst data structure - Added 21 Jun 2026
+if 'catalyst_data' not in st.session_state:
+    st.session_state['catalyst_data'] = load_catalyst_data()
+    # Structure: { "TICKER.NS": { "type": "...", "timeline": "...",
+    #                             "notes": "...", "tagged_at": "..." } }
 
 
 st.set_page_config(
@@ -3539,6 +4073,43 @@ def evaluate_triggers(holding: dict, stock_data: dict, months_held: float) -> di
     triggers["checkpoint_12mo"] = 12 <= months_held <= 14
     triggers["checkpoint_36mo"] = 36 <= months_held <= 38
     triggers["deadline_5yr"] = months_held >= 60
+    
+    # FIX 6.1: Determine urgency level
+    exit_triggers = []
+    exit_urgency = "HOLD"
+    
+    # Trigger 1: PE threshold (existing)
+    sector_exit_pe = SECTOR_PE_MAP.get(sector, 20)
+    if pe_ratio and pe_ratio > sector_exit_pe:
+        exit_triggers.append(f"P/E {pe_ratio:.1f}x exceeds sector exit threshold {sector_exit_pe}x")
+    
+    # Trigger 2: NEW — Stop-loss breach
+    if current_price and entry_price:
+        drawdown_pct = ((current_price - entry_price) / entry_price) * 100
+        if drawdown_pct <= -25:
+            exit_triggers.append(f"🛑 Stop-loss hit: {drawdown_pct:.1f}% from entry (threshold: -25%)")
+    
+    # Trigger 3: NEW — Price significantly exceeds analyst fair value
+    if analyst_target and current_price > analyst_target * 1.10:
+        overshoot_pct = ((current_price / analyst_target) - 1) * 100
+        exit_triggers.append(f"Price {overshoot_pct:.1f}% above analyst target ₹{analyst_target:,.0f} — thesis may be fully priced in")
+    
+    # Trigger 4: NEW — Earnings deterioration signal
+    if earnings_growth is not None and earnings_growth < -0.10:
+        exit_triggers.append(f"Earnings growth {earnings_growth*100:.1f}% YoY — fundamental deterioration signal")
+    
+    # Determine urgency level
+    if any("Stop-loss" in t for t in exit_triggers):
+        exit_urgency = "EXIT NOW"
+    elif len(exit_triggers) >= 2:
+        exit_urgency = "TRIM 50%"
+    elif len(exit_triggers) == 1:
+        exit_urgency = "REVIEW"
+    else:
+        exit_urgency = "HOLD"
+    
+    triggers["exit_triggers"] = exit_triggers
+    triggers["exit_urgency"] = exit_urgency
     
     return triggers
 
@@ -4544,6 +5115,14 @@ with tab_scanner:
             exit_point = None
             entry_signal = "HOLD"
             forecast_50w = None
+            
+            # Initialize fair value variables - Added 21 Jun 2026
+            blended_fv = current_price * 1.25
+            exit_zone1 = None
+            exit_zone2 = None
+            exit_zone3 = None
+            exit_stop = None
+            analyst_target = None
 
             # Get 2-week historical data for entry analysis
             hist_2w = None
@@ -4560,69 +5139,146 @@ with tab_scanner:
                     recent_trend = (current_price - hist_2w['Close'].iloc[0]) / hist_2w['Close'].iloc[0] * 100
 
                     # Determine entry point based on 2-week analysis
+                    # FIX 2.1: Clarify signal label for Condition 1
                     if current_price > dma_50:
                         # Price above 50 DMA - look for pullback to DMA or recent low
                         entry_point = min(dma_50, recent_low)
-                        if current_price < dma_50 * 1.02 or current_price < recent_low * 1.03:
-                            entry_signal = "BUY"
-                        elif recent_trend < -5:  # Recent downtrend
-                            entry_signal = "WAIT"
+                        if current_price <= dma_50 * 1.02 or current_price <= recent_low * 1.03:
+                            entry_signal = "BUY NOW"
+                            entry_note = "Price at or near entry zone"
+                        elif current_price <= dma_50 * 1.10:
+                            entry_signal = "BUY ON PULLBACK"
+                            entry_note = f"Wait for pullback to ₹{entry_point:,.2f}"
+                        else:
+                            entry_signal = "WATCH"
+                            entry_note = f"Entry target ₹{entry_point:,.2f} — currently extended"
                     elif current_price > dma_200:
                         # Price between 50 and 200 DMA
                         entry_point = min(dma_200, recent_low)
-                        if current_price < dma_200 * 1.02 or current_price < recent_low * 1.03:
-                            entry_signal = "BUY"
-                        elif recent_trend < -10:  # Strong recent downtrend
-                            entry_signal = "WAIT"
+                        if current_price <= dma_200 * 1.02 or current_price <= recent_low * 1.03:
+                            entry_signal = "BUY NOW"
+                            entry_note = "Price at or near entry zone"
+                        elif current_price <= dma_200 * 1.10:
+                            entry_signal = "BUY ON PULLBACK"
+                            entry_note = f"Wait for pullback to ₹{entry_point:,.2f}"
+                        else:
+                            entry_signal = "WATCH"
+                            entry_note = f"Entry target ₹{entry_point:,.2f} — currently extended"
                     else:
                         # Price below 200 DMA - current price is the entry point
                         entry_point = current_price
-                        entry_signal = "BUY"
+                        entry_signal = "BUY NOW"
+                        entry_note = "Price below 200 DMA — favorable entry"
                 else:
                     # Fallback to original logic if 2-week data unavailable
                     if current_price > dma_50:
                         entry_point = dma_50
                         if current_price < dma_50 * 1.02:
-                            entry_signal = "BUY"
+                            entry_signal = "BUY NOW"
+                            entry_note = "Price at or near 50 DMA"
+                        elif current_price < dma_50 * 1.10:
+                            entry_signal = "BUY ON PULLBACK"
+                            entry_note = f"Wait for pullback to ₹{entry_point:,.2f}"
+                        else:
+                            entry_signal = "WATCH"
+                            entry_note = f"Entry target ₹{entry_point:,.2f} — currently extended"
                     elif current_price > dma_200:
                         entry_point = dma_200
                         if current_price < dma_200 * 1.02:
-                            entry_signal = "BUY"
+                            entry_signal = "BUY NOW"
+                            entry_note = "Price at or near 200 DMA"
+                        elif current_price < dma_200 * 1.10:
+                            entry_signal = "BUY ON PULLBACK"
+                            entry_note = f"Wait for pullback to ₹{entry_point:,.2f}"
+                        else:
+                            entry_signal = "WATCH"
+                            entry_note = f"Entry target ₹{entry_point:,.2f} — currently extended"
                     else:
                         # Price below 200 DMA - current price is the entry point
                         entry_point = current_price
-                        entry_signal = "BUY"
+                        entry_signal = "BUY NOW"
+                        entry_note = "Price below 200 DMA — favorable entry"
+            
+            # FIX 3.2: Remove double cap, add blended fair value
+            # Get additional metrics for fair value calculation
+            analyst_target = _safe_float(info.get("targetMeanPrice"))
+            eps = _safe_float(info.get("trailingEps") or info.get("forwardEps"))
+            book_value = _safe_float(info.get("bookValue"))
+            earnings_growth = _safe_float(info.get("earningsGrowth"))
+            if earnings_growth and abs(earnings_growth) <= 1:
+                earnings_growth *= 100
+            
+            # Get sector median PE from data if available
+            sector_median_pe = data.get("sector_median_pe")
+            if sector_median_pe is None:
+                # Fallback: use conservative PE of 18
+                sector_median_pe = 18
 
-                # 50-week forecast for exit criteria
-                # Use historical volatility and trend to project 50-week target
-                try:
-                    hist_1y = yf.Ticker(sym).history(period="1y")
-                    if len(hist_1y) > 50:
-                        # Calculate annualized return and volatility
-                        returns = hist_1y['Close'].pct_change().dropna()
-                        annual_return = (1 + returns.mean()) ** 252 - 1
-                        volatility = returns.std() * (252 ** 0.5)
+            # STEP A: Fundamental fair value (priority: analyst target → PE re-rate → fallback)
+            if analyst_target and analyst_target > 0:
+                fundamental_fv = analyst_target
+            elif sector_median_pe and eps and sector_median_pe > 0 and eps > 0:
+                fundamental_fv = sector_median_pe * eps
+            elif pb and book_value and pb > 0:
+                sector_pb = 2.5  # conservative sector average PB fallback
+                fundamental_fv = sector_pb * book_value
+            else:
+                fundamental_fv = current_price * 1.25  # last resort
 
-                        # Conservative forecast: expected return with risk adjustment
-                        expected_50w_return = annual_return * 0.5  # Conservative estimate
-                        risk_adjusted_return = expected_50w_return - (volatility * 0.3)
+            # STEP B: DCF-based fair value (lightweight 3-year projection)
+            growth_rate = (earnings_growth if (earnings_growth and 
+                           earnings_growth > 0) else 0.12)
+            terminal_multiple = sector_median_pe if (sector_median_pe and 
+                        sector_median_pe > 0) else 18
+            discount_rate = 0.12  # 12% hurdle rate for Indian equities
 
-                        # Calculate exit point based on forecast
-                        forecast_50w = current_price * (1 + risk_adjusted_return)
+            eps_now = (eps if (eps and eps > 0) 
+                       else (current_price / pe if (pe and pe > 0) else None))
 
-                        # Ensure exit point is reasonable (maximum 50% gain, no minimum floor)
-                        max_exit = entry_point * 1.50 if entry_point else current_price * 1.50
-                        forecast_50w = min(max_exit, forecast_50w)
-                    else:
-                        # Fallback if insufficient historical data
-                        forecast_50w = current_price * 1.25  # 25% target
-                except:
-                    forecast_50w = current_price * 1.25  # Default 25% target
+            if eps_now and eps_now > 0:
+                eps_3yr = eps_now * ((1 + growth_rate) ** 3)
+                terminal_value = eps_3yr * terminal_multiple
+                dcf_fv = terminal_value / ((1 + discount_rate) ** 3)
+            else:
+                dcf_fv = None
 
-                # Final exit point: use forecast but cap at 52-week high
-                exit_point = forecast_50w
-                if week_52_high:
-                    exit_point = min(exit_point, week_52_high * 0.95)
+            # STEP C: Blend (60% fundamental, 40% DCF)
+            if fundamental_fv and dcf_fv:
+                blended_fv = (0.60 * fundamental_fv) + (0.40 * dcf_fv)
+            elif fundamental_fv:
+                blended_fv = fundamental_fv
+            elif dcf_fv:
+                blended_fv = dcf_fv
+            else:
+                blended_fv = current_price * 1.25
+
+            # STEP D: Sanity cap — fair value cannot exceed 52W high by more than 30%
+            if week_52_high and week_52_high > 0:
+                blended_fv = min(blended_fv, week_52_high * 1.30)
+
+            # STEP E: 3-tier exit zones
+            entry_ref = entry_point if (entry_point and entry_point > 0) else current_price
+            zone1 = entry_ref * 1.20          # +20% — first trim
+            zone2 = blended_fv                # fair value convergence — main target
+            zone3 = blended_fv * 1.15         # 15% above fair value overshoot
+
+            # STEP F: Update forecast_50w to use blended fair value
+            if forecast_50w is None:
+                forecast_50w = max(zone1, min(zone3, blended_fv))
+            else:
+                forecast_50w = max(zone1, min(zone3, forecast_50w))
+
+            # STEP G: Stop loss
+            stop_loss = entry_ref * 0.75
+
+            # STEP H: Expose all zone prices for UI display
+            exit_zone1 = zone1
+            exit_zone2 = zone2   # = blended_fv = primary target
+            exit_zone3 = zone3
+            exit_stop = stop_loss
+
+            # Final exit point: use blended fair value
+            exit_point = blended_fv
 
             # Generate reasoning based on scoring
             reasons = []
@@ -4643,12 +5299,14 @@ with tab_scanner:
 
             # Risk flags
             risks = []
-            if debt_to_equity and debt_to_equity > 0.4:
-                risks.append("Moderate debt")
-            if promoter_holding and promoter_holding < 50:
-                risks.append("Low promoter holding")
-            if pe and pe > 20:
+            # FIX 1.10: Align PE threshold inconsistency - change from >20 to >30
+            if pe and pe > 30:
                 risks.append("High PE")
+            # FIX 1.10: Split debt flag into two levels for better granularity
+            if debt_to_equity and debt_to_equity > 1.0:
+                risks.append("High Debt")
+            elif debt_to_equity and debt_to_equity > 0.4:
+                risks.append("Moderate Debt")
 
             risk_flag = ", ".join(risks) if risks else None
 
@@ -4663,6 +5321,8 @@ with tab_scanner:
                 "risk_penalty": round(dark_horse_result.get("risk_penalty", 0), 1),
                 "risk_flags": risk_flags,
                 "ocf_score": 0,  # Not used in new scoring system
+                "quality_bonus": dark_horse_result.get("quality_bonus"),
+                "revenue_cagr_3yr": dark_horse_result.get("revenue_cagr_3yr"),
                 "current_price": current_price,
                 "pe": pe,
                 "pb": pb,
@@ -4675,19 +5335,38 @@ with tab_scanner:
                 "exit_point": exit_point,
                 "forecast_50w": forecast_50w,
                 "entry_signal": entry_signal,
+                "entry_note": entry_note,
                 "reasoning": reasoning,
                 "risk_flag": risk_flag,
+                # FIX 3.2: Add new exit zones and blended fair value
+                "blended_fv": blended_fv,
+                "exit_zone1": exit_zone1,
+                "exit_zone2": exit_zone2,
+                "exit_zone3": exit_zone3,
+                "exit_stop": exit_stop,
+                "analyst_target": analyst_target,
             })
 
         # Cleanup progress bar
         progress_bar.empty()
 
         # Calculate upside potential and sort by it
+        # FIX 4.1: Upside measured from TODAY's price to fair value, not entry point
         for r in results:
-            if r.get("entry_point") and r.get("exit_point"):
-                r["upside_potential"] = ((r["exit_point"] - r["entry_point"]) / r["entry_point"]) * 100
+            if r.get("blended_fv") and r.get("current_price") and r["current_price"] > 0:
+                r["upside_potential"] = ((r["blended_fv"] - r["current_price"]) / r["current_price"]) * 100
+                
+                # FIX 4.2: Flag overvalued stocks (negative upside)
+                if r["upside_potential"] < 0:
+                    r["overvalued_flag"] = True
+                    r["overvalued_by_pct"] = abs(r["upside_potential"])
+                else:
+                    r["overvalued_flag"] = False
+                    r["overvalued_by_pct"] = 0.0
             else:
                 r["upside_potential"] = 0
+                r["overvalued_flag"] = False
+                r["overvalued_by_pct"] = 0.0
         
         # Sort by upside potential in descending order
         results.sort(key=lambda x: x["upside_potential"], reverse=True)
@@ -4738,14 +5417,31 @@ with tab_scanner:
         st.markdown("### Dark Horse Candidates")
 
         # Filter controls
-        filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
+        filter_col1, filter_col2, filter_col3, filter_col4, filter_col5, filter_col6 = st.columns(6)
         with filter_col1:
             sector_filter = st.selectbox("Filter by Sector", ["All"] + list(set(r["sector"] for r in results)))
         with filter_col2:
-            signal_filter = st.selectbox("Filter by Signal", ["BUY", "HOLD", "All"], index=0)
+            signal_filter = st.selectbox("Filter by Signal", ["BUY NOW", "BUY ON PULLBACK", "WATCH", "All"], index=0)
         with filter_col3:
-            sort_by = st.selectbox("Sort by", ["Upside Potential", "Score", "OCF Score", "PE", "ROE", "Price"])
+            volume_filter = st.selectbox(
+                "Volume Signal",
+                options=["All", "Accumulation Only", "Exclude Distribution"],
+                index=0,
+                help=("Accumulation Only: show only stocks with buying volume. "
+                      "Exclude Distribution: hide stocks with active selling.")
+            )
         with filter_col4:
+            catalyst_filter = st.selectbox(
+                "Catalyst Status",
+                options=["All", "Tagged Only", "High Conviction Only", "Untagged Only"],
+                index=0,
+                help=("Tagged Only: stocks with a catalyst identified. "
+                      "High Conviction: catalyst score >= 7. "
+                      "Untagged Only: stocks needing catalyst review.")
+            )
+        with filter_col5:
+            sort_by = st.selectbox("Sort by", ["Upside Potential", "Score", "OCF Score", "PE", "ROE", "Price", "Volume Signal", "Revenue CAGR"])
+        with filter_col6:
             sort_order = st.selectbox("Sort Order", ["Descending", "Ascending"])
 
         # Apply filters
@@ -4754,6 +5450,23 @@ with tab_scanner:
             filtered_results = [r for r in results if r["sector"] == sector_filter]
         if signal_filter != "All":
             filtered_results = [r for r in filtered_results if r.get("entry_signal") == signal_filter]
+        if volume_filter == "Accumulation Only":
+            filtered_results = [r for r in filtered_results 
+                               if r.get('volume_signal') in 
+                               ["ACCUMULATION", "STRONG ACCUMULATION"]]
+        elif volume_filter == "Exclude Distribution":
+            filtered_results = [r for r in filtered_results 
+                               if r.get('volume_signal') not in 
+                               ["DISTRIBUTION", "STRONG DISTRIBUTION"]]
+        if catalyst_filter == "Tagged Only":
+            filtered_results = [r for r in filtered_results
+                               if r.get('catalyst_score', 0) > 0]
+        elif catalyst_filter == "High Conviction Only":
+            filtered_results = [r for r in filtered_results
+                               if r.get('catalyst_score', 0) >= 7]
+        elif catalyst_filter == "Untagged Only":
+            filtered_results = [r for r in filtered_results
+                               if r.get('catalyst_score', 0) == 0]
 
         # Sort
         reverse = sort_order == "Descending"
@@ -4769,18 +5482,46 @@ with tab_scanner:
             filtered_results.sort(key=lambda x: x["roe"], reverse=reverse)
         elif sort_by == "Price":
             filtered_results.sort(key=lambda x: x["current_price"] or 0, reverse=reverse)
+        elif sort_by == "Volume Signal":
+            VOLUME_SORT_ORDER = {
+                "STRONG ACCUMULATION": 0,
+                "ACCUMULATION":        1,
+                "NEUTRAL":             2,
+                "INACTIVE":            3,
+                "INSUFFICIENT DATA":   4,
+                "DISTRIBUTION":        5,
+                "STRONG DISTRIBUTION": 6,
+            }
+            # Sort: accumulation first, distribution last
+            filtered_results.sort(key=lambda r: VOLUME_SORT_ORDER.get(
+                r.get('volume_signal', 'INSUFFICIENT DATA'), 4
+            ))
+        elif sort_by == "Revenue CAGR":
+            filtered_results.sort(key=lambda x: x.get('revenue_cagr_3yr') or 0, reverse=reverse)
 
         display_data = []
         for idx, r in enumerate(filtered_results, 1):
             score_color = "🟢" if r["score"] >= 80 else "🟡" if r["score"] >= 60 else "🔴"
             signal_emoji = "🟢" if r.get("entry_signal") == "BUY" else "🟡" if r.get("entry_signal") == "HOLD" else "🔴"
             upside = r.get("upside_potential", 0)
+            quality_bonus = r.get("quality_bonus")
+            
+            # Format quality bonus display
+            if quality_bonus is not None:
+                if quality_bonus >= 0:
+                    quality_display = f"🟢 +{quality_bonus:.1f}"
+                else:
+                    quality_display = f"🔴 {quality_bonus:.1f}"
+            else:
+                quality_display = "N/A"
+            
             display_data.append({
                 "Rank": idx,
                 "Symbol": r["symbol"],
                 "Name": r["name"][:30],
                 "Sector": r["sector"][:20],
                 "Score": f"{score_color} {r['score']}",
+                "Quality": quality_display,
                 "Value": f"{r.get('value_score', 0):.1f}",
                 "Fund": f"{r.get('fundamentals_score', 0):.1f}",
                 "Mom": f"{r.get('momentum_score', 0):.1f}",
@@ -4793,6 +5534,7 @@ with tab_scanner:
                 "ROE": f"{r['roe']:.1f}%",
                 "ROCE": f"{r.get('roce', 0):.1f}%" if r.get("roce") else "-",
                 "D/E": f"{r['debt_to_equity']:.2f}",
+                "Revenue CAGR": f"{r.get('revenue_cagr_3yr', 0):.1f}%" if r.get('revenue_cagr_3yr') is not None else "-",
                 "Entry": format_inr(r.get("entry_point")) if r.get("entry_point") else "-",
                 "Exit": format_inr(r.get("exit_point")) if r.get("exit_point") else "-",
                 "Upside %": f"{upside:.1f}%" if upside else "-",
@@ -4802,170 +5544,366 @@ with tab_scanner:
             })
 
         df = pd.DataFrame(display_data)
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        if df.empty:
+            st.warning("No results match the current filters. Try adjusting the filter criteria.")
+        else:
+            st.dataframe(df, use_container_width=True, hide_index=True)
 
         # Deep dive panel
-        st.markdown("### Deep Dive Analysis")
-        selected_stock = st.selectbox("Select a stock for deep dive analysis", [r["symbol"] for r in filtered_results])
+        if filtered_results:
+            st.markdown("### Deep Dive Analysis")
+            selected_stock = st.selectbox("Select a stock for deep dive analysis", [r["symbol"] for r in filtered_results])
 
-        if selected_stock:
-            stock_data = next((r for r in results if r["symbol"] == selected_stock), None)
-            if stock_data:
-                col1, col2 = st.columns(2)
+            if selected_stock:
+                stock_data = next((r for r in results if r["symbol"] == selected_stock), None)
+                if stock_data:
+                    col1, col2 = st.columns(2)
 
-                with col1:
-                    st.markdown(f"#### {stock_data['name']}")
-                    st.markdown(f"**Symbol:** {stock_data['symbol']}")
-                    st.markdown(f"**Sector:** {stock_data['sector']}")
+                    with col1:
+                        st.markdown(f"#### {stock_data['name']}")
+                        st.markdown(f"**Symbol:** {stock_data['symbol']}")
+                        st.markdown(f"**Sector:** {stock_data['sector']}")
+                        
+                        # Total Score badge with color coding
+                        total_score = stock_data['score']
+                        if total_score >= 75:
+                            score_color = "🟢"
+                            score_zone = "Strong Buy zone"
+                        elif total_score >= 50:
+                            score_color = "🟡"
+                            score_zone = "Watch zone"
+                        else:
+                            score_color = "🔴"
+                            score_zone = "Avoid"
+                        
+                        st.markdown(f"### {score_color} Total Score: {total_score}/100")
+                        st.caption(f"({score_zone})")
+                        
+                        # Quality Bonus display
+                        quality_bonus = stock_data.get('quality_bonus')
+                        if quality_bonus is not None:
+                            if quality_bonus >= 0:
+                                qb_color = "🟢"
+                                qb_text = f"+{quality_bonus:.1f}"
+                            else:
+                                qb_color = "🔴"
+                                qb_text = f"{quality_bonus:.1f}"
+                            st.markdown(f"### {qb_color} Quality Bonus: {qb_text}")
+                            st.caption("Rewards earnings quality, promoter conviction, and debt-servicing safety — signals not captured in the core 100-point score")
+                            
+                            # Show breakdown on expand
+                            with st.expander("🔍 Quality Bonus Breakdown"):
+                                qb_detail = stock_data.get('quality_bonus_detail', {})
+                                if qb_detail:
+                                    st.markdown("**F-Score Lite:**")
+                                    fs = qb_detail.get('f_score_lite', {})
+                                    st.markdown(f"Score: {fs.get('score', 0)} | {fs.get('detail', 'N/A')}")
+                                    
+                                    st.markdown("**Promoter Trend:**")
+                                    pt = qb_detail.get('promoter_trend', {})
+                                    st.markdown(f"Score: {pt.get('score', 0)} | {pt.get('detail', 'N/A')}")
+                                    
+                                    st.markdown("**Interest Coverage:**")
+                                    ic = qb_detail.get('interest_coverage', {})
+                                    st.markdown(f"Score: {ic.get('score', 0)} | {ic.get('detail', 'N/A')}")
+                        
+                        # Category scores with color-coded bars
+                        st.markdown("#### Score Breakdown")
+                        
+                        # Value score (35 pts max)
+                        value_score = stock_data.get('value_score', 0)
+                        value_pct = (value_score / 35) * 100
+                        value_color = "green" if value_score >= 28 else "orange" if value_score >= 21 else "red"
+                        st.markdown(f"**Value ({value_score}/35)**")
+                        st.markdown(f'<div style="background: #e0e0e0; border-radius: 5px; width: 100%; height: 20px;"><div style="background: {value_color}; border-radius: 5px; width: {value_pct}%; height: 100%;"></div></div>', unsafe_allow_html=True)
+                        
+                        # Fundamentals score (40 pts max)
+                        fund_score = stock_data.get('fundamentals_score', 0)
+                        fund_pct = (fund_score / 40) * 100
+                        fund_color = "green" if fund_score >= 32 else "orange" if fund_score >= 24 else "red"
+                        st.markdown(f"**Fundamentals ({fund_score}/40)**")
+                        st.markdown(f'<div style="background: #e0e0e0; border-radius: 5px; width: 100%; height: 20px;"><div style="background: {fund_color}; border-radius: 5px; width: {fund_pct}%; height: 100%;"></div></div>', unsafe_allow_html=True)
+                        
+                        # Momentum score (15 pts max)
+                        mom_score = stock_data.get('momentum_score', 0)
+                        mom_pct = (mom_score / 15) * 100
+                        mom_color = "green" if mom_score >= 12 else "orange" if mom_score >= 9 else "red"
+                        st.markdown(f"**Momentum ({mom_score}/15)**")
+                        st.markdown(f'<div style="background: #e0e0e0; border-radius: 5px; width: 100%; height: 20px;"><div style="background: {mom_color}; border-radius: 5px; width: {mom_pct}%; height: 100%;"></div></div>', unsafe_allow_html=True)
+                        
+                        # Risk penalty (up to -10 pts)
+                        risk_penalty = stock_data.get('risk_penalty', 0)
+                        risk_color = "green" if risk_penalty >= -3 else "orange" if risk_penalty >= -6 else "red"
+                        st.markdown(f"**Risk Penalty ({risk_penalty})**")
+                        st.markdown(f'<div style="background: #e0e0e0; border-radius: 5px; width: 100%; height: 20px;"><div style="background: {risk_color}; border-radius: 5px; width: {max(0, 100 + risk_penalty * 10)}%; height: 100%;"></div></div>', unsafe_allow_html=True)
+                        
+                        # Risk Flags section
+                        risk_flags = stock_data.get('risk_flags', [])
+                        if risk_flags:
+                            st.markdown("#### Risk Flags")
+                            for flag in risk_flags:
+                                st.markdown(f'<span style="color: red;">⚠️ {flag}</span>', unsafe_allow_html=True)
+                        
+                        # Revenue CAGR display - Added 21 Jun 2026
+                        revenue_cagr = stock_data.get('revenue_cagr_3yr')
+                        if revenue_cagr is not None:
+                            if revenue_cagr >= 15:
+                                cagr_color = "🟢"
+                                cagr_note = "Strong growth"
+                            elif revenue_cagr >= 8:
+                                cagr_color = "🟢"
+                                cagr_note = "Healthy growth"
+                            elif revenue_cagr >= 0:
+                                cagr_color = "🟡"
+                                cagr_note = "Slow growth"
+                            elif revenue_cagr >= -3:
+                                cagr_color = "🟡"
+                                cagr_note = "Mild decline"
+                            elif revenue_cagr >= -8:
+                                cagr_color = "🔴"
+                                cagr_note = "Declining"
+                            else:
+                                cagr_color = "🔴"
+                                cagr_note = "Severe decline"
+                            st.markdown(f"**Revenue CAGR (3Y):** {cagr_color} {revenue_cagr:.1f}%")
+                            st.caption(cagr_note)
+
+                    with col2:
+                        st.markdown("#### Key Ratios")
+                        st.markdown(f"**PE:** {stock_data['pe']:.1f}")
+                        st.markdown(f"**PB:** {stock_data['pb']:.1f}")
+                        st.markdown(f"**ROE:** {stock_data['roe']:.1f}%")
+                        if stock_data.get('roce'):
+                            st.markdown(f"**ROCE:** {stock_data['roce']:.1f}%")
+                        st.markdown(f"**Debt/Equity:** {stock_data['debt_to_equity']:.2f}")
+                        st.markdown(f"**Current Price:** {format_inr(stock_data['current_price'])}")
+                        if stock_data.get('dma_50'):
+                            st.markdown(f"**50 DMA:** {format_inr(stock_data['dma_50'])}")
+                        if stock_data.get('dma_200'):
+                            st.markdown(f"**200 DMA:** {format_inr(stock_data['dma_200'])}")
+
+                    # What makes it a dark horse
+                    st.markdown("#### What makes it a Dark Horse?")
+                    reasons = []
+                    if stock_data['pe'] < 15:
+                        reasons.append(f"✓ Attractive valuation with PE of {stock_data['pe']:.1f}")
+                    if stock_data['ocf_score'] > 20:
+                        reasons.append("✓ Strong operating cash flow generation")
+                    if stock_data['roe'] > 18:
+                        reasons.append(f"✓ High return on equity at {stock_data['roe']:.1f}%")
+                    if stock_data['debt_to_equity'] < 0.3:
+                        reasons.append(f"✓ Low debt with D/E ratio of {stock_data['debt_to_equity']:.2f}")
+                    if not reasons:
+                        reasons.append("✓ Balanced fundamentals across multiple metrics")
+
+                    for reason in reasons:
+                        st.markdown(f"- {reason}")
+
+                    # Risk factors
+                    if stock_data['risk_flag']:
+                        st.markdown("#### Risk Factors")
+                        risks = stock_data['risk_flag'].split(", ")
+                        for risk in risks:
+                            st.markdown(f"- ⚠️ {risk}")
+
+                    # Entry/Exit recommendations
+                    st.markdown("#### Entry & Exit Recommendations")
+                    if stock_data.get('entry_signal'):
+                        signal = stock_data['entry_signal']
+                        if signal == "BUY NOW":
+                            signal_color = "🟢"
+                        elif signal == "BUY ON PULLBACK":
+                            signal_color = "🟡"
+                        elif signal == "WATCH":
+                            signal_color = "🔵"
+                        else:
+                            signal_color = "🟢" if signal == "BUY" else "🟡" if signal == "HOLD" else "🔴"
+                        st.markdown(f"**Current Signal:** {signal_color} {signal}")
+                        if stock_data.get('entry_note'):
+                            st.caption(stock_data['entry_note'])
+                
+                    # Volume signal badge — added 21 Jun 2026
+                    volume_signal = stock_data.get('volume_signal')
+                    volume_signal_note = stock_data.get('volume_signal_note')
+                    if volume_signal:
+                        volume_badge_map = {
+                            "STRONG ACCUMULATION": ("🟢 Strong Accumulation", "green"),
+                            "ACCUMULATION":        ("🟢 Accumulation",        "green"),
+                            "DISTRIBUTION":        ("🔴 Distribution",        "red"),
+                            "STRONG DISTRIBUTION": ("🔴 Strong Distribution", "red"),
+                            "INACTIVE":            ("⚫ Inactive",            "gray"),
+                            "NEUTRAL":             ("⚪ Neutral Volume",      "gray"),
+                            "INSUFFICIENT DATA":   ("⚪ No Volume Data",      "gray"),
+                        }
+                        badge_text, badge_color = volume_badge_map.get(
+                            volume_signal, ("⚪ Unknown", "gray")
+                        )
+                        st.markdown(
+                            f"**Volume Signal:** {badge_text}  "
+                            f"<span style='color:{badge_color}; font-size:0.85em'>"
+                            f"{volume_signal_note}</span>",
+                            unsafe_allow_html=True
+                        )
                     
-                    # Total Score badge with color coding
-                    total_score = stock_data['score']
-                    if total_score >= 75:
-                        score_color = "🟢"
-                        score_zone = "Strong Buy zone"
-                    elif total_score >= 50:
-                        score_color = "🟡"
-                        score_zone = "Watch zone"
-                    else:
-                        score_color = "🔴"
-                        score_zone = "Avoid"
+                    if stock_data.get('entry_point'):
+                        st.markdown(f"**Suggested Entry Price:** {format_inr(stock_data['entry_point'])}")
+                        st.caption("Based on 2-week historical analysis and DMA support levels")
+                    if stock_data.get('blended_fv'):
+                        # FIX 5.1: Upside display with colour coding
+                        upside = stock_data.get('upside_potential', 0)
+                        if stock_data.get('overvalued_flag'):
+                            st.markdown(f"⚠️ **Overvalued** vs fair value by {stock_data.get('overvalued_by_pct', 0):.1f}%", unsafe_allow_html=True)
+                        elif upside >= 15:
+                            st.markdown(f"🟢 **Upside: +{upside:.1f}%**", unsafe_allow_html=True)
+                        elif upside >= 8:
+                            st.markdown(f"🟡 **Upside: +{upside:.1f}%**", unsafe_allow_html=True)
+                        else:
+                            st.markdown(f"🔴 **Upside: +{upside:.1f}%**", unsafe_allow_html=True)
+                    if stock_data.get('exit_zone1'):
+                        # FIX 5.2: Exit zones display
+                        st.markdown("**Exit Zones:**")
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("Zone 1 (Trim 25%)", f"₹{stock_data['exit_zone1']:,.0f}", 
+                                      f"+{((stock_data['exit_zone1']/stock_data['current_price'])-1)*100:.0f}%")
+                        with col2:
+                            st.metric("Zone 2 (Trim 50%)", f"₹{stock_data['exit_zone2']:,.0f}",
+                                      f"+{((stock_data['exit_zone2']/stock_data['current_price'])-1)*100:.0f}%")
+                        with col3:
+                            st.metric("Zone 3 (Full Exit)", f"₹{stock_data['exit_zone3']:,.0f}",
+                                      f"+{((stock_data['exit_zone3']/stock_data['current_price'])-1)*100:.0f}%")
+                        with col4:
+                            st.metric("Stop Loss", f"₹{stock_data['exit_stop']:,.0f}",
+                                      f"{((stock_data['exit_stop']/stock_data['current_price'])-1)*100:.0f}%",
+                                      delta_color="inverse")
+                        st.caption(f"Fair Value: ₹{stock_data['blended_fv']:,.0f}  |  "
+                                   f"Analyst Target: ₹{stock_data['analyst_target']:,.0f}"
+                                   if stock_data.get('analyst_target') else 
+                                   f"Fair Value: ₹{stock_data['blended_fv']:,.0f}  |  "
+                                   f"(No analyst target — DCF/PE based estimate)")
                     
-                    st.markdown(f"### {score_color} Total Score: {total_score}/100")
-                    st.caption(f"({score_zone})")
+                    if stock_data.get('forecast_50w'):
+                        st.markdown(f"**50-Week Forecast:** {format_inr(stock_data['forecast_50w'])}")
+
+                    # Catalyst tagging UI - Added 21 Jun 2026
+                    ticker = stock_data['symbol']
+                    catalyst_score = stock_data.get('catalyst_score', 0)
+                    catalyst_label = stock_data.get('catalyst_label', '⚪ Not Tagged')
+                    existing = st.session_state['catalyst_data'].get(ticker, {})
+                
+                    with st.expander(
+                        f"🎯 Catalyst: {catalyst_label}  "
+                        f"({'Score: +' + str(catalyst_score) if catalyst_score > 0 else 'No catalyst tagged — score penalty'})",
+                        expanded=False
+                    ):
+                        col_a, col_b = st.columns(2)
+                        
+                        with col_a:
+                            cat_type = st.selectbox(
+                                "Catalyst Type",
+                                options=list(CATALYST_TYPE_SCORE.keys()),
+                                index=list(CATALYST_TYPE_SCORE.keys()).index(
+                                    existing.get('type', 'NONE_IDENTIFIED')
+                                ),
+                                key=f"cat_type_{ticker}",
+                                format_func=lambda x: {
+                                    "CAPEX_COMMISSION":  "New Capacity/Plant",
+                                    "DEMERGER_SPINOFF":  "Demerger / Spinoff",
+                                    "DIVESTMENT":        "Government Divestment",
+                                    "POLICY_TAILWIND":   "Policy / PLI / Budget",
+                                    "DEBT_REDUCTION":    "Debt Reduction",
+                                    "MANAGEMENT_CHANGE": "Management Change",
+                                    "SECTOR_RERATING":   "Sector Re-rating",
+                                    "EARNINGS_RECOVERY": "Earnings Recovery",
+                                    "NONE_IDENTIFIED":   "❌ No Catalyst Identified",
+                                }.get(x, x)
+                            )
+                        
+                        with col_b:
+                            cat_timeline = st.selectbox(
+                                "Expected Timeline",
+                                options=["0-6mo", "6-12mo", "12-24mo", "24mo+"],
+                                index=["0-6mo","6-12mo","12-24mo","24mo+"].index(
+                                    existing.get('timeline', '12-24mo')
+                                ),
+                                key=f"cat_timeline_{ticker}"
+                            )
+                        
+                        cat_notes = st.text_input(
+                            "Catalyst Notes (optional)",
+                            value=existing.get('notes', ''),
+                            placeholder="e.g. New refinery commissioning Q3 FY27",
+                            key=f"cat_notes_{ticker}"
+                        )
+                        
+                        if st.button("Save Catalyst", key=f"cat_save_{ticker}"):
+                            st.session_state['catalyst_data'][ticker] = {
+                                'type':      cat_type,
+                                'timeline':  cat_timeline,
+                                'notes':     cat_notes,
+                                'tagged_at': pd.Timestamp.now().strftime('%Y-%m-%d')
+                            }
+                            save_catalyst_data(st.session_state['catalyst_data'])
+                            st.success(
+                                f"Saved. Catalyst score: "
+                                f"+{CATALYST_TYPE_SCORE.get(cat_type,0) * CATALYST_TIMELINE_MULTIPLIER.get(cat_timeline,0.5):.1f} pts"
+                            )
+                            st.rerun()
                     
-                    # Category scores with color-coded bars
+                    # Show when last tagged
+                    if existing.get('tagged_at'):
+                        st.caption(f"Last tagged: {existing['tagged_at']}")
+
+                    # FIX 5.3: Data quality flag
+                    data_quality_issues = []
+                    if not stock_data.get('analyst_target'):
+                        data_quality_issues.append("no analyst target")
+                    if not stock_data.get('eps'):
+                        data_quality_issues.append("no EPS data")
+                    if len(data_quality_issues) >= 2:
+                        st.caption(f"⚠️ Limited data — estimate based on available metrics ({', '.join(data_quality_issues)}). Fair value is approximate.")
+
+                    # Score breakdown (simple bar chart)
                     st.markdown("#### Score Breakdown")
-                    
-                    # Value score (35 pts max)
-                    value_score = stock_data.get('value_score', 0)
-                    value_pct = (value_score / 35) * 100
-                    value_color = "green" if value_score >= 28 else "orange" if value_score >= 21 else "red"
-                    st.markdown(f"**Value ({value_score}/35)**")
-                    st.markdown(f'<div style="background: #e0e0e0; border-radius: 5px; width: 100%; height: 20px;"><div style="background: {value_color}; border-radius: 5px; width: {value_pct}%; height: 100%;"></div></div>', unsafe_allow_html=True)
-                    
-                    # Fundamentals score (40 pts max)
-                    fund_score = stock_data.get('fundamentals_score', 0)
-                    fund_pct = (fund_score / 40) * 100
-                    fund_color = "green" if fund_score >= 32 else "orange" if fund_score >= 24 else "red"
-                    st.markdown(f"**Fundamentals ({fund_score}/40)**")
-                    st.markdown(f'<div style="background: #e0e0e0; border-radius: 5px; width: 100%; height: 20px;"><div style="background: {fund_color}; border-radius: 5px; width: {fund_pct}%; height: 100%;"></div></div>', unsafe_allow_html=True)
-                    
-                    # Momentum score (15 pts max)
-                    mom_score = stock_data.get('momentum_score', 0)
-                    mom_pct = (mom_score / 15) * 100
-                    mom_color = "green" if mom_score >= 12 else "orange" if mom_score >= 9 else "red"
-                    st.markdown(f"**Momentum ({mom_score}/15)**")
-                    st.markdown(f'<div style="background: #e0e0e0; border-radius: 5px; width: 100%; height: 20px;"><div style="background: {mom_color}; border-radius: 5px; width: {mom_pct}%; height: 100%;"></div></div>', unsafe_allow_html=True)
-                    
-                    # Risk penalty (up to -10 pts)
-                    risk_penalty = stock_data.get('risk_penalty', 0)
-                    risk_color = "green" if risk_penalty >= -3 else "orange" if risk_penalty >= -6 else "red"
-                    st.markdown(f"**Risk Penalty ({risk_penalty})**")
-                    st.markdown(f'<div style="background: #e0e0e0; border-radius: 5px; width: 100%; height: 20px;"><div style="background: {risk_color}; border-radius: 5px; width: {max(0, 100 + risk_penalty * 10)}%; height: 100%;"></div></div>', unsafe_allow_html=True)
-                    
-                    # Risk Flags section
-                    risk_flags = stock_data.get('risk_flags', [])
-                    if risk_flags:
-                        st.markdown("#### Risk Flags")
-                        for flag in risk_flags:
-                            st.markdown(f'<span style="color: red;">⚠️ {flag}</span>', unsafe_allow_html=True)
+                    score_components = {
+                        "PE Score": 15,
+                        "EPS Growth": 15,
+                        "Debt + ROE": 15,
+                        "Institutional Interest": 15,
+                        "Price Position": 15,
+                        "ROCE Score": 10,
+                        "DMA Trend": 10,
+                        "OCF Score": 25,
+                    }
 
-                with col2:
-                    st.markdown("#### Key Ratios")
-                    st.markdown(f"**PE:** {stock_data['pe']:.1f}")
-                    st.markdown(f"**PB:** {stock_data['pb']:.1f}")
-                    st.markdown(f"**ROE:** {stock_data['roe']:.1f}%")
-                    if stock_data.get('roce'):
-                        st.markdown(f"**ROCE:** {stock_data['roce']:.1f}%")
-                    st.markdown(f"**Debt/Equity:** {stock_data['debt_to_equity']:.2f}")
-                    st.markdown(f"**Current Price:** {format_inr(stock_data['current_price'])}")
-                    if stock_data.get('dma_50'):
-                        st.markdown(f"**50 DMA:** {format_inr(stock_data['dma_50'])}")
-                    if stock_data.get('dma_200'):
-                        st.markdown(f"**200 DMA:** {format_inr(stock_data['dma_200'])}")
+                    # Estimate component scores based on total score
+                    estimated_scores = {}
+                    remaining_score = stock_data['score']
+                    for component, max_score in score_components.items():
+                        if component == "OCF Score":
+                            estimated_scores[component] = stock_data['ocf_score']
+                            remaining_score -= stock_data['ocf_score']
+                        else:
+                            # Distribute remaining score proportionally
+                            component_score = min(max_score, max_score * (remaining_score / sum(v for k, v in score_components.items() if k != "OCF Score")))
+                            estimated_scores[component] = round(component_score, 1)
 
-                # What makes it a dark horse
-                st.markdown("#### What makes it a Dark Horse?")
-                reasons = []
-                if stock_data['pe'] < 15:
-                    reasons.append(f"✓ Attractive valuation with PE of {stock_data['pe']:.1f}")
-                if stock_data['ocf_score'] > 20:
-                    reasons.append("✓ Strong operating cash flow generation")
-                if stock_data['roe'] > 18:
-                    reasons.append(f"✓ High return on equity at {stock_data['roe']:.1f}%")
-                if stock_data['debt_to_equity'] < 0.3:
-                    reasons.append(f"✓ Low debt with D/E ratio of {stock_data['debt_to_equity']:.2f}")
-                if not reasons:
-                    reasons.append("✓ Balanced fundamentals across multiple metrics")
+                    score_df = pd.DataFrame([
+                        {"Component": k, "Score": v, "Max": score_components[k]}
+                        for k, v in estimated_scores.items()
+                    ])
 
-                for reason in reasons:
-                    st.markdown(f"- {reason}")
-
-                # Risk factors
-                if stock_data['risk_flag']:
-                    st.markdown("#### Risk Factors")
-                    risks = stock_data['risk_flag'].split(", ")
-                    for risk in risks:
-                        st.markdown(f"- ⚠️ {risk}")
-
-                # Entry/Exit recommendations
-                st.markdown("#### Entry & Exit Recommendations")
-                if stock_data.get('entry_signal'):
-                    signal_color = "🟢" if stock_data['entry_signal'] == "BUY" else "🟡" if stock_data['entry_signal'] == "HOLD" else "🔴"
-                    st.markdown(f"**Current Signal:** {signal_color} {stock_data['entry_signal']}")
-                if stock_data.get('entry_point'):
-                    st.markdown(f"**Suggested Entry Price:** {format_inr(stock_data['entry_point'])}")
-                    st.caption("Based on 2-week historical analysis and DMA support levels")
-                if stock_data.get('exit_point'):
-                    st.markdown(f"**Target Exit Price:** {format_inr(stock_data['exit_point'])}")
-                    st.caption("Based on 50-week forecast using historical volatility and trend")
-                    if stock_data.get('current_price') and stock_data.get('entry_point'):
-                        potential_gain = ((stock_data['exit_point'] - stock_data['entry_point']) / stock_data['entry_point']) * 100
-                        st.markdown(f"**Potential Gain:** {potential_gain:.1f}%")
-                if stock_data.get('forecast_50w'):
-                    st.markdown(f"**50-Week Forecast:** {format_inr(stock_data['forecast_50w'])}")
-
-                # Score breakdown (simple bar chart)
-                st.markdown("#### Score Breakdown")
-                score_components = {
-                    "PE Score": 15,
-                    "EPS Growth": 15,
-                    "Debt + ROE": 15,
-                    "Institutional Interest": 15,
-                    "Price Position": 15,
-                    "ROCE Score": 10,
-                    "DMA Trend": 10,
-                    "OCF Score": 25,
-                }
-
-                # Estimate component scores based on total score
-                estimated_scores = {}
-                remaining_score = stock_data['score']
-                for component, max_score in score_components.items():
-                    if component == "OCF Score":
-                        estimated_scores[component] = stock_data['ocf_score']
-                        remaining_score -= stock_data['ocf_score']
-                    else:
-                        # Distribute remaining score proportionally
-                        component_score = min(max_score, max_score * (remaining_score / sum(v for k, v in score_components.items() if k != "OCF Score")))
-                        estimated_scores[component] = round(component_score, 1)
-
-                score_df = pd.DataFrame([
-                    {"Component": k, "Score": v, "Max": score_components[k]}
-                    for k, v in estimated_scores.items()
-                ])
-
-                score_fig = px.bar(
-                    score_df,
-                    x="Component",
-                    y="Score",
-                    color="Score",
-                    color_continuous_scale="RdYlGn",
-                    range_y=[0, 25],
-                    title="Score Breakdown by Component",
-                )
-                apply_chart_theme(score_fig, height=300)
-                st.plotly_chart(score_fig, use_container_width=True)
+                    score_fig = px.bar(
+                        score_df,
+                        x="Component",
+                        y="Score",
+                        color="Score",
+                        color_continuous_scale="RdYlGn",
+                        range_y=[0, 25],
+                        title="Score Breakdown by Component",
+                    )
+                    apply_chart_theme(score_fig, height=300)
+                    st.plotly_chart(score_fig, use_container_width=True)
 
         # Sector distribution
         if results:
@@ -5166,6 +6104,19 @@ with tab_exit_tracker:
                 
                 # Trigger checklist (collapsed)
                 with st.expander("🔍 Trigger Checklist"):
+                    # FIX 6.1: Display exit triggers with urgency
+                    exit_triggers = holding['triggers'].get('exit_triggers', [])
+                    exit_urgency = holding['triggers'].get('exit_urgency', 'HOLD')
+                    
+                    if exit_triggers:
+                        for trigger in exit_triggers:
+                            st.warning(trigger)
+                        st.error(f"Recommended action: **{exit_urgency}**")
+                    else:
+                        st.success("✅ No exit triggers fired — HOLD")
+                    
+                    st.markdown("---")
+                    
                     trigger_items = []
                     if holding['triggers']['stop_loss']:
                         trigger_items.append("🔴 Stop-loss triggered")
@@ -5185,10 +6136,9 @@ with tab_exit_tracker:
                         trigger_items.append("🟠 Overshot analyst target")
                     
                     if trigger_items:
+                        st.markdown("**Legacy Triggers:**")
                         for item in trigger_items:
                             st.markdown(item)
-                    else:
-                        st.markdown("✅ No triggers activated")
 
 with tab_mutual_funds:
     render_section_header(

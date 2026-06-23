@@ -5023,6 +5023,10 @@ with tab_scanner:
         if "scanner_results" in st.session_state:
             del st.session_state["scanner_results"]
         
+        # Clear all Streamlit caches to ensure fresh data
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        
         # Fetch Nifty 500 stocks
         try:
             url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"

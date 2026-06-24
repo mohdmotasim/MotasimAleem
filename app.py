@@ -2873,8 +2873,11 @@ def _empty_stock_data(sym: str, *, rate_limited: bool = False) -> dict:
     }
 
 
-@st.cache_data(ttl=120)
-def fetch_stock_data(symbol: str) -> dict:
+def fetch_stock_data_uncached(symbol: str) -> dict:
+    """
+    Fetch stock data WITHOUT caching - for scanner runs only.
+    This ensures fresh data every time the scanner runs.
+    """
     sym = (symbol or "").strip().upper()
     if sym and not sym.endswith(NSE_SUFFIX):
         sym = f"{sym}{NSE_SUFFIX}"
@@ -3099,6 +3102,12 @@ def fetch_stock_data(symbol: str) -> dict:
         return result
     except Exception:
         return _empty_stock_data(sym, rate_limited=True)
+
+
+@st.cache_data(ttl=120)
+def fetch_stock_data(symbol: str) -> dict:
+    """Cached version for normal use (Research tab, etc.)"""
+    return fetch_stock_data_uncached(symbol)
 
 
 def load_stock_data(symbol: str) -> dict:
@@ -5027,6 +5036,10 @@ with tab_scanner:
         st.cache_data.clear()
         st.cache_resource.clear()
         
+        # Generate unique cache key for this scan to force fresh data
+        scan_timestamp = datetime.now().timestamp()
+        st.session_state["scan_timestamp"] = scan_timestamp
+        
         # Fetch Nifty 500 stocks
         try:
             url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
@@ -5055,7 +5068,7 @@ with tab_scanner:
             progress_bar.progress(progress, text=f"Scanning {sym} ({idx + 1}/{len(stocks_to_screen)})")
 
             try:
-                data = fetch_stock_data(sym)
+                data = fetch_stock_data_uncached(sym)
                 info = yf.Ticker(sym).info or {}
 
                 # Fundamental metrics (for scoring, not strict filtering)

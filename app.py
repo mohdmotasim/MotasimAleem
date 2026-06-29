@@ -5036,9 +5036,15 @@ with tab_scanner:
         st.cache_data.clear()
         st.cache_resource.clear()
         
-        # Generate unique cache key for this scan to force fresh data
-        scan_timestamp = datetime.now().timestamp()
-        st.session_state["scan_timestamp"] = scan_timestamp
+        # Delete old scanner results file to prevent loading stale data
+        if os.path.isfile(SCANNER_RESULTS_FILE):
+            try:
+                os.remove(SCANNER_RESULTS_FILE)
+            except Exception:
+                pass
+        
+        # Set new timestamp immediately
+        st.session_state["scanner_timestamp"] = datetime.now().strftime("%d %b %Y, %I:%M %p")
         
         # Fetch Nifty 500 stocks
         try:

@@ -5060,7 +5060,7 @@ with tab_scanner:
     # Scanner controls
     col1, col2, col3 = st.columns(3)
     with col1:
-        min_score = st.slider("Minimum Dark Horse Score", 0, 100, 60)
+        min_score = st.slider("Minimum Dark Horse Score", 0, 100, 70)
     with col2:
         scan_btn = st.button("Run Scanner", use_container_width=True)
     with col3:

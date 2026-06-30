@@ -5445,6 +5445,10 @@ with tab_scanner:
                 "exit_zone3": exit_zone3,
                 "exit_stop": exit_stop,
                 "analyst_target": analyst_target,
+                # Add volume signal data
+                "volume_signal": data.get("volume_signal"),
+                "volume_signal_color": data.get("volume_signal_color"),
+                "volume_signal_note": data.get("volume_signal_note"),
             })
 
         # Cleanup progress bar
@@ -5618,6 +5622,25 @@ with tab_scanner:
             else:
                 quality_display = "N/A"
             
+            # Format volume signal with emoji
+            volume_signal = r.get("volume_signal", "INSUFFICIENT DATA")
+            if volume_signal == "STRONG ACCUMULATION":
+                volume_emoji = "🟢🟢"
+            elif volume_signal == "ACCUMULATION":
+                volume_emoji = "🟢"
+            elif volume_signal == "STRONG DISTRIBUTION":
+                volume_emoji = "🔴🔴"
+            elif volume_signal == "DISTRIBUTION":
+                volume_emoji = "🔴"
+            elif volume_signal == "NEUTRAL":
+                volume_emoji = "⚪"
+            elif volume_signal == "INACTIVE":
+                volume_emoji = "💤"
+            else:
+                volume_emoji = "❓"
+            
+            volume_display = f"{volume_emoji} {volume_signal}"
+            
             display_data.append({
                 "Rank": idx,
                 "Symbol": r["symbol"],
@@ -5630,6 +5653,7 @@ with tab_scanner:
                 "Mom": f"{r.get('momentum_score', 0):.1f}",
                 "Risk": f"{r.get('risk_penalty', 0):.1f}",
                 "Signal": f"{signal_emoji} {r.get('entry_signal', '-')}",
+                "Volume": volume_display,
                 "Price": format_inr(r["current_price"]),
                 "50 DMA": format_inr(r.get("dma_50")) if r.get("dma_50") else "-",
                 "200 DMA": format_inr(r.get("dma_200")) if r.get("dma_200") else "-",

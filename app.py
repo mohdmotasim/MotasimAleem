@@ -5532,10 +5532,29 @@ with tab_scanner:
         with filter_col3:
             volume_filter = st.selectbox(
                 "Volume Signal",
-                options=["All", "Accumulation Only", "Exclude Distribution"],
+                options=[
+                    "All",
+                    "Strong Accumulation",
+                    "Accumulation",
+                    "Neutral",
+                    "Inactive",
+                    "Distribution",
+                    "Strong Distribution",
+                    "Insufficient Data"
+                ],
                 index=0,
-                help=("Accumulation Only: show only stocks with buying volume. "
-                      "Exclude Distribution: hide stocks with active selling.")
+                help=(
+                    "Volume signals indicate buying/selling pressure:\n"
+                    "• Strong Accumulation: Price up on 2x+ normal volume (strong buying)\n"
+                    "• Accumulation: Price up on 1.5x+ normal volume (buying)\n"
+                    "• Neutral: Normal volume, no clear directional signal\n"
+                    "• Inactive: Volume at <0.5x average (no meaningful activity)\n"
+                    "• Distribution: Price down on 1.5x+ volume (selling pressure)\n"
+                    "• Strong Distribution: Price down on 2x+ volume (significant selling)\n"
+                    "• Insufficient Data: Volume data unavailable\n\n"
+                    "Difference: Neutral has data but shows no clear trend. "
+                    "Insufficient Data means data is missing/unavailable."
+                )
             )
         with filter_col4:
             catalyst_filter = st.selectbox(
@@ -5557,14 +5576,20 @@ with tab_scanner:
             filtered_results = [r for r in results if r["sector"] == sector_filter]
         if signal_filter != "All":
             filtered_results = [r for r in filtered_results if r.get("entry_signal") == signal_filter]
-        if volume_filter == "Accumulation Only":
-            filtered_results = [r for r in filtered_results 
-                               if r.get('volume_signal') in 
-                               ["ACCUMULATION", "STRONG ACCUMULATION"]]
-        elif volume_filter == "Exclude Distribution":
-            filtered_results = [r for r in filtered_results 
-                               if r.get('volume_signal') not in 
-                               ["DISTRIBUTION", "STRONG DISTRIBUTION"]]
+        if volume_filter != "All":
+            # Map filter option to actual volume signal values
+            volume_filter_map = {
+                "Strong Accumulation": "STRONG ACCUMULATION",
+                "Accumulation": "ACCUMULATION",
+                "Neutral": "NEUTRAL",
+                "Inactive": "INACTIVE",
+                "Distribution": "DISTRIBUTION",
+                "Strong Distribution": "STRONG DISTRIBUTION",
+                "Insufficient Data": "INSUFFICIENT DATA"
+            }
+            target_signal = volume_filter_map.get(volume_filter)
+            if target_signal:
+                filtered_results = [r for r in filtered_results if r.get('volume_signal') == target_signal]
         if catalyst_filter == "Tagged Only":
             filtered_results = [r for r in filtered_results
                                if r.get('catalyst_score', 0) > 0]

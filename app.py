@@ -521,6 +521,10 @@ SCANNER_RESULTS_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), ".data", "scanner_results.json"
 )
 
+SCANNER_PROGRESS_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), ".data", "scanner_progress.json"
+)
+
 MF_PORTFOLIO_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), ".data", "mf_portfolio.json"
 )
@@ -969,6 +973,39 @@ def _save_scanner_results_to_disk(scanner_data: dict) -> None:
             json.dump(scanner_data, handle, indent=2)
     except OSError:
         pass
+
+
+def _save_scanner_progress_to_disk(progress_data: dict) -> None:
+    """Save scanner progress to enable resume functionality."""
+    try:
+        os.makedirs(os.path.dirname(SCANNER_PROGRESS_FILE), exist_ok=True)
+        with open(SCANNER_PROGRESS_FILE, "w", encoding="utf-8") as handle:
+            json.dump(progress_data, handle, indent=2)
+    except OSError:
+        pass
+
+
+def _load_scanner_progress_from_disk() -> dict | None:
+    """Load scanner progress to resume from last position."""
+    if not os.path.isfile(SCANNER_PROGRESS_FILE):
+        return None
+    try:
+        with open(SCANNER_PROGRESS_FILE, encoding="utf-8") as handle:
+            data = json.load(handle)
+        if not isinstance(data, dict):
+            return None
+        return data
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+
+
+def _clear_scanner_progress() -> None:
+    """Clear scanner progress file when starting a fresh scan."""
+    if os.path.isfile(SCANNER_PROGRESS_FILE):
+        try:
+            os.remove(SCANNER_PROGRESS_FILE)
+        except Exception:
+            pass
 
 
 def get_holdings() -> list[dict]:
@@ -5021,13 +5058,20 @@ with tab_scanner:
     )
 
     # Scanner controls
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         min_score = st.slider("Minimum Dark Horse Score", 0, 100, 60)
     with col2:
         scan_btn = st.button("Run Scanner", use_container_width=True)
+    with col3:
+        resume_btn = st.button("Resume Scan", use_container_width=True)
 
-    if scan_btn:
+    # Check for existing progress
+    existing_progress = _load_scanner_progress_from_disk()
+    if existing_progress:
+        st.info(f"⏸️ Previous scan found: {existing_progress.get('processed', 0)}/{existing_progress.get('total', 0)} stocks processed. Click 'Resume Scan' to continue.")
+
+    if scan_btn or resume_btn:
         # Clear old scanner results to force re-display with updated format
         if "scanner_results" in st.session_state:
             del st.session_state["scanner_results"]
@@ -5036,12 +5080,24 @@ with tab_scanner:
         st.cache_data.clear()
         st.cache_resource.clear()
         
-        # Delete old scanner results file to prevent loading stale data
-        if os.path.isfile(SCANNER_RESULTS_FILE):
-            try:
-                os.remove(SCANNER_RESULTS_FILE)
-            except Exception:
-                pass
+        # Handle resume vs fresh scan
+        if resume_btn and existing_progress:
+            # Load existing progress
+            start_index = existing_progress.get("processed", 0)
+            results = existing_progress.get("results", [])
+            skipped = existing_progress.get("skipped", 0)
+            st.info(f"🔄 Resuming scan from stock {start_index + 1}/{existing_progress.get('total', 0)}")
+        else:
+            # Fresh scan - clear everything
+            if os.path.isfile(SCANNER_RESULTS_FILE):
+                try:
+                    os.remove(SCANNER_RESULTS_FILE)
+                except Exception:
+                    pass
+            _clear_scanner_progress()
+            start_index = 0
+            results = []
+            skipped = 0
         
         # Set new timestamp immediately
         st.session_state["scanner_timestamp"] = datetime.now().strftime("%d %b %Y, %I:%M %p")
@@ -5066,12 +5122,33 @@ with tab_scanner:
 
         results = []
         skipped = 0
+        start_index = 0
+
+        # If resuming, load progress
+        if resume_btn and existing_progress:
+            start_index = existing_progress.get("processed", 0)
+            results = existing_progress.get("results", [])
+            skipped = existing_progress.get("skipped", 0)
 
         progress_bar = st.progress(0)
 
         for idx, sym in enumerate(stocks_to_screen):
+            # Skip already processed stocks if resuming
+            if idx < start_index:
+                continue
+                
             progress = (idx + 1) / len(stocks_to_screen)
             progress_bar.progress(progress, text=f"Scanning {sym} ({idx + 1}/{len(stocks_to_screen)})")
+            
+            # Save progress every 10 stocks
+            if (idx + 1) % 10 == 0:
+                _save_scanner_progress_to_disk({
+                    "processed": idx + 1,
+                    "total": len(stocks_to_screen),
+                    "results": results,
+                    "skipped": skipped,
+                    "timestamp": datetime.now().strftime("%d %b %Y, %I:%M %p")
+                })
 
             try:
                 data = fetch_stock_data_uncached(sym)
@@ -5418,6 +5495,9 @@ with tab_scanner:
             "skipped": skipped,
             "timestamp": st.session_state["scanner_timestamp"]
         })
+
+        # Clear progress file after successful completion
+        _clear_scanner_progress()
 
         st.success(f"Scan complete! Found {len(filtered_results)} dark horse candidates out of {len(stocks_to_screen)} stocks screened.")
         st.rerun()
